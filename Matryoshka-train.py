@@ -1,16 +1,8 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
-
-
 import pandas as pd
 import torch
 import numpy as np
 import json
-# Generate a random vector of size 768
 import csv
-
 import torch
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer, AutoModel
@@ -23,24 +15,29 @@ import json
 import re
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
+import random
+import json
+import random
+import json
+
+# In[20]:
+import torch
+import gc
+torch.cuda.is_available()
+torch.cuda.current_device()
+torch.cuda.get_device_name(0)
+device = torch.cuda.current_device()
+torch.cuda.empty_cache()
+gc.collect()
 
 
-# In[2]:
 
-
-BATCH_SIZE = 24
+BATCH_SIZE = 16
 EMBEDDING_SIZE= 768
 
-# In[3]:
 
 
-#more_data = pd.read_csv('/mnt/projects/qanon_proj/topic-diff/huati-chayi2/zenodo_release_data.csv')
-
-
-# In[5]:
-
-
-f  = open('/mnt/projects/qanon_proj/topic-diff/huati-chayi2/multilingual_paragraph1_paragraph2_label-20240816-2.jsonl')
+f  = open('NEWS PAIR DATASET')
 url_to_also_apear = dict()
 for line in f:
     try:
@@ -73,13 +70,12 @@ for url in url_to_also_apear:
         url_to_also_apear[url].update(url_to_also_apear[other_url])
 
 
-# In[6]:
 
 
 label_to_urls = dict()
 url_to_label = dict()
 current_label =  -1
-f  = open('/mnt/projects/qanon_proj/topic-diff/huati-chayi2/multilingual_paragraph1_paragraph2_label-20240816-2.jsonl')
+f  = open('NEWS PAIR DATASET')
 for line in f:
     try:
         line = json.loads(line)
@@ -144,15 +140,11 @@ for url in url_to_label:
 # In[8]:
 
 
-import random
-#random.shuffle(lines)
-import json
 
 
-# In[9]:
 
 
-f  = open('/mnt/projects/qanon_proj/topic-diff/huati-chayi2/multilingual_paragraph1_paragraph2_label-20240816-2.jsonl')
+f  = open('NEWS PAIR DATASET')
 lines = []
 num_bad = 0 
 for line in f:
@@ -164,7 +156,6 @@ for line in f:
         print(e)
 
 
-# In[10]:
 
 
 import json
@@ -184,13 +175,11 @@ def load_emebdding_dataset(file_name):
     return dataset, labels
 
 
-# In[11]:
 
 
-dataset, labels = load_emebdding_dataset('/mnt/projects/qanon_proj/topic-diff/huati-chayi2/multilingual_paragraph1_paragraph2_label-20240816-2.jsonl')
+dataset, labels = load_emebdding_dataset('NES PAIR DATASET')
 
 
-# In[12]:
 
 
 import random
@@ -201,14 +190,13 @@ random.shuffle(c)
 dataset, labels = zip(*c)
 
 
-# In[13]:
 
 
-train_dataset = dataset[:int(0.99*len(dataset))]
-val_dataset = dataset[int(0.99*len(dataset)):]
+train_dataset = dataset[:int(0.90*len(dataset))]
+val_dataset = dataset[int(0.90*len(dataset)):]
 
-train_labels = labels[:int(0.99*len(labels))]
-val_labels = labels[int(0.99*len(labels)):]
+train_labels = labels[:int(0.90*len(labels))]
+val_labels = labels[int(0.90*len(labels)):]
 
 
 # In[14]:
@@ -261,14 +249,12 @@ class NonRepeatingBatchSampler(Sampler):
         return len(self.batches)
 
 
-# In[15]:
 
 
 train_sampler = NonRepeatingBatchSampler(train_labels, BATCH_SIZE)
 val_sampler = NonRepeatingBatchSampler(val_labels, BATCH_SIZE)
 
 
-# In[16]:
 
 
 class EmbeddingDataset(Dataset):
@@ -315,7 +301,6 @@ class EmbeddingDataset(Dataset):
         return batched_data
 
 
-# In[17]:
 
 
 import random
@@ -323,12 +308,10 @@ from transformers import UMT5EncoderModel, AutoTokenizer
 class Object(object):
     pass
 args = Object()
-model_name ='intfloat/multilingual-e5-base'#'intfloat/e5-base-v2'#'intfloat/multilingual-e5-base' #'microsoft/mdeberta-v3-base'#'google/umt5-base'
-args.tokenizer ='intfloat/multilingual-e5-base'#'intfloat/e5-base-v2'#intfloat/multilingual-e5-base'#microsoft/mdeberta-v3-base'# 'google/umt5-base'
-#random.shuffle(dataset)
+model_name ='intfloat/multilingual-e5-base'
+args.tokenizer ='intfloat/multilingual-e5-base'
 
 
-# In[18]:
 
 
 train_data = EmbeddingDataset(train_dataset, args)
@@ -336,39 +319,20 @@ train_data_dataloader = DataLoader(train_data,batch_sampler=train_sampler,
                                       collate_fn=train_data.collate_fn)
 
 
-# In[19]:
 
 
-#train_data = EmbeddingDataset(train_dataset, args)
 val_data = EmbeddingDataset(val_dataset, args)
 val_data_dataloader = DataLoader(val_data,batch_sampler=val_sampler,
                                       collate_fn=val_data.collate_fn)
 
 
-# In[20]:
-import torch
-import gc
-torch.cuda.is_available()
-torch.cuda.current_device()
-torch.cuda.get_device_name(0)
-device = torch.cuda.current_device()
-torch.cuda.empty_cache()
-gc.collect()
 
-
-# Load model from HuggingFace Hub
 tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir= 'cache',use_fast =False)
 model = AutoModel.from_pretrained(model_name, cache_dir= 'cache')
 
 model = model.to(device)
 model = model.train()
 
-# In[21]:
-
-
-
-
-# In[22]:
 
 
 from transformers import AutoTokenizer, AutoModel
@@ -382,8 +346,6 @@ def mean_pooling(model_output, attention_mask):
     return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
 
 
-# In[23]:
-
 
 def cosine_loss(y_true: torch.Tensor, y_pred: torch.Tensor, tau: float = 20.0) -> torch.Tensor:
     """
@@ -396,9 +358,7 @@ def cosine_loss(y_true: torch.Tensor, y_pred: torch.Tensor, tau: float = 20.0) -
     :param tau: float, scale factor, default 20
 
     :return: torch.Tensor, loss value
-    """  # NOQA
-    # modified from: https://github.com/bojone/CoSENT/blob/124c368efc8a4b179469be99cb6e62e1f2949d39/cosent.py#L79
-    #y_true = y_true[::2, 0]
+    """  
     y_true = (y_true[:, None] < y_true[None, :]).float()
     y_pred = F.normalize(y_pred, p=2, dim=1)
     y_pred = torch.sum(y_pred[::2] * y_pred[1::2], dim=1) * tau
@@ -409,10 +369,9 @@ def cosine_loss(y_true: torch.Tensor, y_pred: torch.Tensor, tau: float = 20.0) -
     return torch.logsumexp(y_pred, dim=0)
 
 
-# In[24]:
 
-
-def angle_loss(y_true: torch.Tensor, y_pred: torch.Tensor, tau: float = 1.0, pooling_strategy: str = 'sum'):
+## Apdated from the 
+def angle_loss(y_true, y_pred, tau= 1.0, pooling_strategy = 'sum'):
     """
     Compute angle loss
 
