@@ -346,7 +346,7 @@ def mean_pooling(model_output, attention_mask):
     return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
 
 
-
+### Adapted from https://github.com/SeanLee97/AnglE
 def cosine_loss(y_true: torch.Tensor, y_pred: torch.Tensor, tau: float = 20.0) -> torch.Tensor:
     """
     Compute cosine loss
@@ -370,7 +370,7 @@ def cosine_loss(y_true: torch.Tensor, y_pred: torch.Tensor, tau: float = 20.0) -
 
 
 
-## Apdated from the 
+## Apdated from https://github.com/SeanLee97/AnglE
 def angle_loss(y_true, y_pred, tau= 1.0, pooling_strategy = 'sum'):
     """
     Compute angle loss
@@ -437,26 +437,15 @@ def calculate_loss(embeddings_1_data_norm, embeddings_1_diff_data_norm, embeddin
     mask[indices, indices + len(embeddings_1_data_norm)] = True  # Adjust this offset based on your column count
     mask[indices+ len(embeddings_1_data_norm), indices]  = True
     mask[indices+len(embeddings_1_data_norm), indices+len(embeddings_1_data_norm)]  = True
-    '''
-    new_weight = torch.zeros(cosine_matrix.size(), dtype=torch.float)
-    indices = torch.arange(embeddings_1_data_norm.size(0))
-    new_weight[indices, indices] = 1
-    new_weight[indices, indices +len(embeddings_1_data_norm)] = torch.tensor(b_margins)  # Adjust this offset based on your column count
-    new_weight[indices+ len(embeddings_1_data_norm), indices]  = torch.tensor(b_margins)
-    new_weight[indices+len(embeddings_1_data_norm), indices+len(embeddings_1_data_norm)]  = 1
-    '''
     
     top= torch.exp(cosine_matrix/temp)*mask.to(device)
-    #new_weight = new_weight/torch.sum(torch.exp(new_weight),dim = 1)
-    #new_weight = torch.sum(new_weight, dim = 1)
     top = torch.sum(top,dim =1)
     bottom = torch.exp(cosine_matrix/temp)
     bottom = torch.sum(bottom,dim = 1)
-    loss = torch.sum(-torch.log(top/bottom))#*new_weight.to(device)
+    loss = torch.sum(-torch.log(top/bottom))
     return loss
 
 
-# In[26]:
 
 
 import torch
@@ -474,7 +463,6 @@ def interleave_rows(tensor1, tensor2, embedding_size):
     return interleaved
 
 
-# In[27]:
 
 
 import torch
@@ -487,17 +475,10 @@ def calculate_cosine_angle_loss(embeddings_1_data_norm, embeddings_1_diff_data_n
     total_b_margins = torch.cat((torch.ones(embeddings_1_data_norm.size(0)),torch.ones(embeddings_1_data_norm.size(0)),torch.tensor(b_margins),torch.tensor(b_margins)),dim = 0 )
     return cosine_loss(total_b_margins.to(device),combined_all)+ angle_loss(total_b_margins.to(device),combined_all)+calculate_loss(embeddings_1_data_norm, embeddings_1_diff_data_norm, embeddings_2_data_norm, embeddings_2_diff_data_norm,b_margins)
 
-# In[28]:
 
 
 opt = torch.optim.AdamW(model.parameters(), lr=5e-5)
 
-
-# In[29]:
-
-
-
-# In[30]:
 
 
 def model_eval(dataloader, model, device):
@@ -542,11 +523,7 @@ def model_eval(dataloader, model, device):
             b_margins_third = b_margins.clone()
             b_margins_third[indices_high] = 1#b_margins[indices_high]
             b_margins_third[indices_low] = 0
-            #indices_high = (b_margins >= 1.0).nonzero(as_tuple=True)[0]
-            #indices_low = (b_margins < 1.0).nonzero(as_tuple=True)[0]
-            #b_margins_fourth= b_margins.clone()
-            #b_margins_fourth[indices_high] = 1
-            #b_margins_fourth[indices_low] = 0
+        
         
             ### FIRST EMBEDDING Matryoshka
             embeddings_1_first = embeddings_1[:, :int(EMBEDDING_SIZE/4)]
@@ -597,35 +574,15 @@ def model_eval(dataloader, model, device):
             embeddings_2_diff_norms_third = embeddings_2_diff_third.norm(dim=1, keepdim=True)
             embeddings_2_diff_data_norm_third = embeddings_2_diff_third / embeddings_2_diff_norms_third
     
-    
-            ### FOURTH EMBEDDING Matryoshka
-            '''
-            embeddings_1_fourth = embeddings_1[:, :EMBEDDING_SIZE]
-            embeddings_1_diff_fourth  = embeddings_1_diff[:, :EMBEDDING_SIZE]
-            embeddings_2_fourth  = embeddings_2[:, :EMBEDDING_SIZE]
-            embeddings_2_diff_fourth = embeddings_2_diff[:, :EMBEDDING_SIZE]
-            
-            ## Normalize
-            embeddings_1_norms_fourth = embeddings_1_fourth.norm(dim=1, keepdim=True)
-            embeddings_1_data_norm_fourth = embeddings_1_fourth / embeddings_1_norms_fourth
-            embeddings_1_diff_norms_fourth = embeddings_1_diff_fourth.norm(dim=1, keepdim=True)
-            embeddings_1_diff_data_norm_fourth = embeddings_1_diff_fourth / embeddings_1_diff_norms_fourth
-            embeddings_2_norms_fourth = embeddings_2_fourth.norm(dim=1, keepdim=True)
-            embeddings_2_data_norm_fourth = embeddings_2_fourth / embeddings_2_norms_fourth
-            embeddings_2_diff_norms_fourth = embeddings_2_diff_fourth.norm(dim=1, keepdim=True)
-            embeddings_2_diff_data_norm_fourth = embeddings_2_diff_fourth / embeddings_2_diff_norms_fourth
-            '''
-    
             loss = calculate_cosine_angle_loss(embeddings_1_data_norm_first, embeddings_1_diff_data_norm_first, embeddings_2_data_norm_first, embeddings_2_diff_data_norm_first,b_margins_first,int(EMBEDDING_SIZE/4))/BATCH_SIZE
             loss += calculate_cosine_angle_loss(embeddings_1_data_norm_second, embeddings_1_diff_data_norm_second, embeddings_2_data_norm_second, embeddings_2_diff_data_norm_second,b_margins_second,int(EMBEDDING_SIZE/2))/BATCH_SIZE
             loss += calculate_cosine_angle_loss(embeddings_1_data_norm_third, embeddings_1_diff_data_norm_third, embeddings_2_data_norm_third, embeddings_2_diff_data_norm_third,b_margins_third,int(EMBEDDING_SIZE/1))/BATCH_SIZE
             #loss += calculate_cosine_angle_loss(embeddings_1_data_norm_fourth, embeddings_1_diff_data_norm_fourth, embeddings_2_data_norm_fourth, embeddings_2_diff_data_norm_fourth,b_margins_fourth,int(EMBEDDING_SIZE))/BATCH_SIZE
             total_loss+=float(loss.item())
     
-        return total_loss # f1, #prec, recall, report, y_pred, y_true
+        return total_loss 
 
 
-# In[31]:
 
 
 import os
@@ -634,19 +591,15 @@ if not os.path.isdir('multilingual-matryoshka-e5-calculate_cosine_angle_loss-fix
 epoch = 0 
 
 
-# In[66]:
-
 
 minimum_loss = 999999999999999
 for epoch in range(0,1000000):
     num_batches = 0 
     model = model.train()
     for batch in tqdm(train_data_dataloader, desc=f'train-{epoch}'):
-        #model = model.train()
         b_ids_1, b_mask_1,b_ids_2, b_mask_2, b_margins = (batch['text_pair1_token_ids'],
                                    batch['text_pair1_attention_mask'], batch['text_pair2_token_ids'], batch['text_pair2_attention_mask'],batch['margins'])
         opt.zero_grad()
-        #print(batch)
         b_ids_1 = b_ids_1.to(device)
         b_mask_1 = b_mask_1.to(device)
     
@@ -681,11 +634,7 @@ for epoch in range(0,1000000):
         b_margins_third = b_margins.clone()
         b_margins_third[indices_high] = 1#b_margins[indices_high]
         b_margins_third[indices_low] = 0
-        #indices_high = (b_margins >= 1.0).nonzero(as_tuple=True)[0]
-        #indices_low = (b_margins < 1.0).nonzero(as_tuple=True)[0]
-        #b_margins_fourth= b_margins.clone()
-        #b_margins_fourth[indices_high] = 1
-        #b_margins_fourth[indices_low] = 0
+
     
         ### FIRST EMBEDDING Matryoshka
         embeddings_1_first = embeddings_1[:, :int(EMBEDDING_SIZE/4)]
@@ -737,53 +686,31 @@ for epoch in range(0,1000000):
         embeddings_2_diff_data_norm_third = embeddings_2_diff_third / embeddings_2_diff_norms_third
 
 
-        ### FOURTH EMBEDDING Matryoshka
-        '''
-        embeddings_1_fourth = embeddings_1[:, :EMBEDDING_SIZE]
-        embeddings_1_diff_fourth  = embeddings_1_diff[:, :EMBEDDING_SIZE]
-        embeddings_2_fourth  = embeddings_2[:, :EMBEDDING_SIZE]
-        embeddings_2_diff_fourth = embeddings_2_diff[:, :EMBEDDING_SIZE]
         
-        ## Normalize
-        embeddings_1_norms_fourth = embeddings_1_fourth.norm(dim=1, keepdim=True)
-        embeddings_1_data_norm_fourth = embeddings_1_fourth / embeddings_1_norms_fourth
-        embeddings_1_diff_norms_fourth = embeddings_1_diff_fourth.norm(dim=1, keepdim=True)
-        embeddings_1_diff_data_norm_fourth = embeddings_1_diff_fourth / embeddings_1_diff_norms_fourth
-        embeddings_2_norms_fourth = embeddings_2_fourth.norm(dim=1, keepdim=True)
-        embeddings_2_data_norm_fourth = embeddings_2_fourth / embeddings_2_norms_fourth
-        embeddings_2_diff_norms_fourth = embeddings_2_diff_fourth.norm(dim=1, keepdim=True)
-        embeddings_2_diff_data_norm_fourth = embeddings_2_diff_fourth / embeddings_2_diff_norms_fourth
-        '''
 
         loss = calculate_cosine_angle_loss(embeddings_1_data_norm_first, embeddings_1_diff_data_norm_first, embeddings_2_data_norm_first, embeddings_2_diff_data_norm_first,b_margins_first,int(EMBEDDING_SIZE/4))/BATCH_SIZE
         loss += calculate_cosine_angle_loss(embeddings_1_data_norm_second, embeddings_1_diff_data_norm_second, embeddings_2_data_norm_second, embeddings_2_diff_data_norm_second,b_margins_second,int(EMBEDDING_SIZE/2))/BATCH_SIZE
         loss += calculate_cosine_angle_loss(embeddings_1_data_norm_third, embeddings_1_diff_data_norm_third, embeddings_2_data_norm_third, embeddings_2_diff_data_norm_third,b_margins_third,int(EMBEDDING_SIZE/1))/BATCH_SIZE
-        #loss += calculate_cosine_angle_loss(embeddings_1_data_norm_fourth, embeddings_1_diff_data_norm_fourth, embeddings_2_data_norm_fourth, embeddings_2_diff_data_norm_fourth,b_margins_fourth,int(EMBEDDING_SIZE))/BATCH_SIZE
         
         num_batches+=1
         
 
         loss.backward()
         opt.step()
-        if num_batches %10000 ==0:
-            validation_loss = model_eval(val_data_dataloader,model, device) 
-            if validation_loss < minimum_loss:
+        try:
+            f = open('multilingual-matryoshka-e5-calculate_cosine_angle_loss-scne-loss-train_loss-fixed.txt','a+')
+            f.write(str(loss.item())+"\n")
+            f.close()
+        except Exception as e:
+            print(e)
+    try:
+        validation_loss = model_eval(val_data_dataloader,model, device) 
+        if validation_loss < minimum_loss:
                 try:
                     torch.save(model.state_dict(), 'multilingual-matryoshka-e5-calculate_cosine_angle_loss-fixed-regular/multilingual-20240816-matryoshka-e5-calculate_cosine_angle_loss-base'+str(epoch)+'-'+str(num_batches)+'.pt')
                 except Exception as e:
                     print(e)
                 minium_loss = validation_loss
-        #if num_batches % 250 ==0:
-        try:
-            f = open('multilingual-matryoshka-e5-calculate_cosine_angle_loss-scne-loss-train_loss-fixed.txt','a+')
-            f.write(str(loss.item())+"\n")
-            f.close()
-        except Excpetion as e:
-            print(e)
-        print(loss.item())
-    print('HERE')
-    try:
-        torch.save(model.state_dict(), 'multilingual-matryoshka-e5-calculate_cosine_angle_loss-fixed-regular/multilingual-20240816-matryoshka-e5-base'+str(epoch)+'.pt')
     except Exception as e:
         print(e)
 
