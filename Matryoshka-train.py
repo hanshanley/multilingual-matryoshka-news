@@ -351,239 +351,199 @@ opt = torch.optim.AdamW(model.parameters(), lr=2e-5)
 
 
 def model_eval(dataloader, model, device):
-    model.eval()  # switch to eval model, will turn off randomness like dropout
-    with torch.no_grad():
+    """
+    Evaluate the model on a given dataset using the specified device.
+
+    Args:
+    - dataloader: DataLoader object containing the validation data.
+    - model: The PyTorch model to evaluate.
+    - device: The device (CPU/GPU) on which the model is being evaluated.
+
+    Returns:
+    - total_loss: The total loss over the entire validation dataset.
+    """
+    model.eval()  # Set the model to evaluation mode (disables dropout, etc.)
+    with torch.no_grad():  # Disable gradient calculation for evaluation
         total_loss = 0 
-        for batch in tqdm(val_data_dataloader, desc=f'train-{epoch}'):
-            b_ids_1, b_mask_1,b_ids_2, b_mask_2, b_margins = (batch['text_pair1_token_ids'],
-                                   batch['text_pair1_attention_mask'], batch['text_pair2_token_ids'], batch['text_pair2_attention_mask'],batch['margins'])
-    
-            b_ids_1 = b_ids_1.to(device)
-            b_mask_1 = b_mask_1.to(device)
-        
-            
-            b_ids_2 = b_ids_2.to(device)
-            b_mask_2 = b_mask_2.to(device)
+        for batch in tqdm(dataloader, desc=f'Validation Epoch {epoch}'):
+            # Unpack the batch data and move to the specified device
+            b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_margins = (
+                batch['text_pair1_token_ids'],
+                batch['text_pair1_attention_mask'],
+                batch['text_pair2_token_ids'],
+                batch['text_pair2_attention_mask'],
+                batch['margins']
+            )
+            b_ids_1, b_mask_1 = b_ids_1.to(device), b_mask_1.to(device)
+            b_ids_2, b_mask_2 = b_ids_2.to(device), b_mask_2.to(device)
             b_margins = torch.tensor(b_margins)
-            embeddings_1 = model(b_ids_1,b_mask_1)
-            embeddings_1 = mean_pooling(embeddings_1, b_mask_1)
-        
-            embeddings_1_diff = model(b_ids_1,b_mask_1)
-            embeddings_1_diff = mean_pooling(embeddings_1_diff, b_mask_1)
-        
-            embeddings_2 = model(b_ids_2,b_mask_2)
-            embeddings_2 = mean_pooling(embeddings_2, b_mask_2)
-        
-            embeddings_2_diff = model(b_ids_2,b_mask_2)
-            embeddings_2_diff = mean_pooling(embeddings_2_diff, b_mask_2)
 
-            indices_high = (b_margins >= 0.25).nonzero(as_tuple=True)[0]
-            indices_low = (b_margins < 0.25).nonzero(as_tuple=True)[0]
-            b_margins_first = b_margins.clone()
-            b_margins_first[indices_high] = 1#b_margins[indices_high]
-            b_margins_first[indices_low] = 0
-            indices_high = (b_margins >= 0.50).nonzero(as_tuple=True)[0]
-            indices_low = (b_margins < 0.50).nonzero(as_tuple=True)[0]
-            b_margins_second = b_margins.clone()
-            b_margins_second[indices_high] = 1#b_margins[indices_high]
-            b_margins_second[indices_low] = 0
-            indices_high = (b_margins >= 0.75).nonzero(as_tuple=True)[0]
-            indices_low = (b_margins < 0.75).nonzero(as_tuple=True)[0]
-            b_margins_third = b_margins.clone()
-            b_margins_third[indices_high] = 1#b_margins[indices_high]
-            b_margins_third[indices_low] = 0
-        
-        
-            ### FIRST EMBEDDING Matryoshka
-            embeddings_1_first = embeddings_1[:, :int(EMBEDDING_SIZE/4)]
-            embeddings_1_diff_first = embeddings_1_diff[:, :int(EMBEDDING_SIZE/4)]
-            embeddings_2_first = embeddings_2[:, :int(EMBEDDING_SIZE/4)]
-            embeddings_2_diff_first = embeddings_2_diff[:, :int(EMBEDDING_SIZE/4)]
+            # Forward pass through the model and mean pooling
+            embeddings_1 = mean_pooling(model(b_ids_1, b_mask_1), b_mask_1)
+            embeddings_1_diff = mean_pooling(model(b_ids_1, b_mask_1), b_mask_1)
+            embeddings_2 = mean_pooling(model(b_ids_2, b_mask_2), b_mask_2)
+            embeddings_2_diff = mean_pooling(model(b_ids_2, b_mask_2), b_mask_2)
+
+            # Calculate binary margin categories
+            b_margins_first = (b_margins >= 0.25).float()
+            b_margins_second = (b_margins >= 0.50).float()
+            b_margins_third = (b_margins >= 0.75).float()
+
+            # First level embeddings (1/4 size)
+            embeddings_1_first = embeddings_1[:, :int(EMBEDDING_SIZE / 4)]
+            embeddings_1_diff_first = embeddings_1_diff[:, :int(EMBEDDING_SIZE / 4)]
+            embeddings_2_first = embeddings_2[:, :int(EMBEDDING_SIZE / 4)]
+            embeddings_2_diff_first = embeddings_2_diff[:, :int(EMBEDDING_SIZE / 4)]
+            embeddings_1_data_norm_first = embeddings_1_first / embeddings_1_first.norm(dim=1, keepdim=True)
+            embeddings_1_diff_data_norm_first = embeddings_1_diff_first / embeddings_1_diff_first.norm(dim=1, keepdim=True)
+            embeddings_2_data_norm_first = embeddings_2_first / embeddings_2_first.norm(dim=1, keepdim=True)
+            embeddings_2_diff_data_norm_first = embeddings_2_diff_first / embeddings_2_diff_first.norm(dim=1, keepdim=True)
+
+            # Second level embeddings (1/2 size)
+            embeddings_1_second = embeddings_1[:, :int(EMBEDDING_SIZE / 2)]
+            embeddings_1_diff_second = embeddings_1_diff[:, :int(EMBEDDING_SIZE / 2)]
+            embeddings_2_second = embeddings_2[:, :int(EMBEDDING_SIZE / 2)]
+            embeddings_2_diff_second = embeddings_2_diff[:, :int(EMBEDDING_SIZE / 2)]
+            embeddings_1_data_norm_second = embeddings_1_second / embeddings_1_second.norm(dim=1, keepdim=True)
+            embeddings_1_diff_data_norm_second = embeddings_1_diff_second / embeddings_1_diff_second.norm(dim=1, keepdim=True)
+            embeddings_2_data_norm_second = embeddings_2_second / embeddings_2_second.norm(dim=1, keepdim=True)
+            embeddings_2_diff_data_norm_second = embeddings_2_diff_second / embeddings_2_diff_second.norm(dim=1, keepdim=True)
+
+            # Third level embeddings (full size)
+            embeddings_1_third = embeddings_1[:, :int(EMBEDDING_SIZE / 1)]
+            embeddings_1_diff_third = embeddings_1_diff[:, :int(EMBEDDING_SIZE / 1)]
+            embeddings_2_third = embeddings_2[:, :int(EMBEDDING_SIZE / 1)]
+            embeddings_2_diff_third = embeddings_2_diff[:, :int(EMBEDDING_SIZE / 1)]
+            embeddings_1_data_norm_third = embeddings_1_third / embeddings_1_third.norm(dim=1, keepdim=True)
+            embeddings_1_diff_data_norm_third = embeddings_1_diff_third / embeddings_1_diff_third.norm(dim=1, keepdim=True)
+            embeddings_2_data_norm_third = embeddings_2_third / embeddings_2_third.norm(dim=1, keepdim=True)
+            embeddings_2_diff_data_norm_third = embeddings_2_diff_third / embeddings_2_diff_third.norm(dim=1, keepdim=True)
+
+            # Calculate combined loss across different embedding levels
+            loss = calculate_cosine_angle_loss(
+                embeddings_1_data_norm_first, embeddings_1_diff_data_norm_first,
+                embeddings_2_data_norm_first, embeddings_2_diff_data_norm_first,
+                b_margins_first, int(EMBEDDING_SIZE / 4)
+            ) / BATCH_SIZE
+            loss += calculate_cosine_angle_loss(
+                embeddings_1_data_norm_second, embeddings_1_diff_data_norm_second,
+                embeddings_2_data_norm_second, embeddings_2_diff_data_norm_second,
+                b_margins_second, int(EMBEDDING_SIZE / 2)
+            ) / BATCH_SIZE
+            loss += calculate_cosine_angle_loss(
+                embeddings_1_data_norm_third, embeddings_1_diff_data_norm_third,
+                embeddings_2_data_norm_third, embeddings_2_diff_data_norm_third,
+                b_margins_third, int(EMBEDDING_SIZE / 1)
+            ) / BATCH_SIZE
             
-            ## Normalize
-            embeddings_1_norms_first = embeddings_1_first.norm(dim=1, keepdim=True)
-            embeddings_1_data_norm_first = embeddings_1_first / embeddings_1_norms_first
-            embeddings_1_diff_norms_first = embeddings_1_diff_first.norm(dim=1, keepdim=True)
-            embeddings_1_diff_data_norm_first = embeddings_1_diff_first / embeddings_1_diff_norms_first
-            embeddings_2_norms_first = embeddings_2_first.norm(dim=1, keepdim=True)
-            embeddings_2_data_norm_first = embeddings_2_first / embeddings_2_norms_first
-            embeddings_2_diff_norms_first = embeddings_2_diff_first.norm(dim=1, keepdim=True)
-            embeddings_2_diff_data_norm_first = embeddings_2_diff_first / embeddings_2_diff_norms_first
+            total_loss += float(loss.item())  # Accumulate the loss for this batch
     
-            ### SECOND EMBEDDING Matryoshka
-            embeddings_1_second = embeddings_1[:, :int(EMBEDDING_SIZE/2)]
-            embeddings_1_diff_second  = embeddings_1_diff[:, :int(EMBEDDING_SIZE/2)]
-            embeddings_2_second  = embeddings_2[:, :int(EMBEDDING_SIZE/2)]
-            embeddings_2_diff_second = embeddings_2_diff[:, :int(EMBEDDING_SIZE/2)]
-            
-            ## Normalize
-            embeddings_1_norms_second = embeddings_1_second.norm(dim=1, keepdim=True)
-            embeddings_1_data_norm_second = embeddings_1_second / embeddings_1_norms_second
-            embeddings_1_diff_norms_second = embeddings_1_diff_second.norm(dim=1, keepdim=True)
-            embeddings_1_diff_data_norm_second = embeddings_1_diff_second / embeddings_1_diff_norms_second
-            embeddings_2_norms_second = embeddings_2_second.norm(dim=1, keepdim=True)
-            embeddings_2_data_norm_second = embeddings_2_second / embeddings_2_norms_second
-            embeddings_2_diff_norms_second = embeddings_2_diff_second.norm(dim=1, keepdim=True)
-            embeddings_2_diff_data_norm_second = embeddings_2_diff_second / embeddings_2_diff_norms_second
-    
-    
-            ### THIRD EMBEDDING Matryoshka
-            embeddings_1_third = embeddings_1[:, :int(EMBEDDING_SIZE/1)]
-            embeddings_1_diff_third  = embeddings_1_diff[:, :int(EMBEDDING_SIZE/1)]
-            embeddings_2_third  = embeddings_2[:, :int(EMBEDDING_SIZE/1)]
-            embeddings_2_diff_third = embeddings_2_diff[:, :int(EMBEDDING_SIZE/1)]
-            
-            ## Normalize
-            embeddings_1_norms_third = embeddings_1_third.norm(dim=1, keepdim=True)
-            embeddings_1_data_norm_third = embeddings_1_third / embeddings_1_norms_third
-            embeddings_1_diff_norms_third = embeddings_1_diff_third.norm(dim=1, keepdim=True)
-            embeddings_1_diff_data_norm_third = embeddings_1_diff_third / embeddings_1_diff_norms_third
-            embeddings_2_norms_third = embeddings_2_third.norm(dim=1, keepdim=True)
-            embeddings_2_data_norm_third = embeddings_2_third / embeddings_2_norms_third
-            embeddings_2_diff_norms_third = embeddings_2_diff_third.norm(dim=1, keepdim=True)
-            embeddings_2_diff_data_norm_third = embeddings_2_diff_third / embeddings_2_diff_norms_third
-    
-            loss = calculate_cosine_angle_loss(embeddings_1_data_norm_first, embeddings_1_diff_data_norm_first, embeddings_2_data_norm_first, embeddings_2_diff_data_norm_first,b_margins_first,int(EMBEDDING_SIZE/4))/BATCH_SIZE
-            loss += calculate_cosine_angle_loss(embeddings_1_data_norm_second, embeddings_1_diff_data_norm_second, embeddings_2_data_norm_second, embeddings_2_diff_data_norm_second,b_margins_second,int(EMBEDDING_SIZE/2))/BATCH_SIZE
-            loss += calculate_cosine_angle_loss(embeddings_1_data_norm_third, embeddings_1_diff_data_norm_third, embeddings_2_data_norm_third, embeddings_2_diff_data_norm_third,b_margins_third,int(EMBEDDING_SIZE/1))/BATCH_SIZE
-            #loss += calculate_cosine_angle_loss(embeddings_1_data_norm_fourth, embeddings_1_diff_data_norm_fourth, embeddings_2_data_norm_fourth, embeddings_2_diff_data_norm_fourth,b_margins_fourth,int(EMBEDDING_SIZE))/BATCH_SIZE
-            total_loss+=float(loss.item())
-    
-        return total_loss 
+        return total_loss  # Return the total loss over the entire validation dataset
 
 
-
-
+# Directory setup for saving models
 import os
-if not os.path.isdir('multilingual-matryoshka-e5-calculate_cosine_angle_loss-fixed-regular'):
-    os.mkdir('multilingual-matryoshka-e5-calculate_cosine_angle_loss-fixed-regular')
-epoch = 0 
+if not os.path.isdir('FOLDER'):
+    os.mkdir('FOLDER')
 
-
-
-minimum_loss = 999999999999999
-for epoch in range(0,1000000):
+# Training loop
+minimum_loss = float('inf')  # Initialize minimum loss as infinity
+for epoch in range(0, 1000000):
     num_batches = 0 
-    model = model.train()
+    model.train()  # Set the model to training mode
     for batch in tqdm(train_data_dataloader, desc=f'train-{epoch}'):
-        b_ids_1, b_mask_1,b_ids_2, b_mask_2, b_margins = (batch['text_pair1_token_ids'],
-                                   batch['text_pair1_attention_mask'], batch['text_pair2_token_ids'], batch['text_pair2_attention_mask'],batch['margins'])
-        opt.zero_grad()
-        b_ids_1 = b_ids_1.to(device)
-        b_mask_1 = b_mask_1.to(device)
-    
-        
-        b_ids_2 = b_ids_2.to(device)
-        b_mask_2 = b_mask_2.to(device)
+        # Unpack the batch data and move to the specified device
+        b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_margins = (
+            batch['text_pair1_token_ids'],
+            batch['text_pair1_attention_mask'],
+            batch['text_pair2_token_ids'],
+            batch['text_pair2_attention_mask'],
+            batch['margins']
+        )
+        opt.zero_grad()  # Zero the gradients before backpropagation
+        b_ids_1, b_mask_1 = b_ids_1.to(device), b_mask_1.to(device)
+        b_ids_2, b_mask_2 = b_ids_2.to(device), b_mask_2.to(device)
         b_margins = torch.tensor(b_margins)
-        embeddings_1 = model(b_ids_1,b_mask_1)
-        embeddings_1 = mean_pooling(embeddings_1, b_mask_1)
-    
-        embeddings_1_diff = model(b_ids_1,b_mask_1)
-        embeddings_1_diff = mean_pooling(embeddings_1_diff, b_mask_1)
-    
-        embeddings_2 = model(b_ids_2,b_mask_2)
-        embeddings_2 = mean_pooling(embeddings_2, b_mask_2)
-    
-        embeddings_2_diff = model(b_ids_2,b_mask_2)
-        embeddings_2_diff = mean_pooling(embeddings_2_diff, b_mask_2)
 
-        indices_high = (b_margins >= 0.25).nonzero(as_tuple=True)[0]
-        indices_low = (b_margins < 0.25).nonzero(as_tuple=True)[0]
-        b_margins_first = b_margins.clone()
-        b_margins_first[indices_high] = 1#b_margins[indices_high]
-        b_margins_first[indices_low] = 0
-        indices_high = (b_margins >= 0.50).nonzero(as_tuple=True)[0]
-        indices_low = (b_margins < 0.50).nonzero(as_tuple=True)[0]
-        b_margins_second = b_margins.clone()
-        b_margins_second[indices_high] = 1#b_margins[indices_high]
-        b_margins_second[indices_low] = 0
-        indices_high = (b_margins >= 0.75).nonzero(as_tuple=True)[0]
-        indices_low = (b_margins < 0.75).nonzero(as_tuple=True)[0]
-        b_margins_third = b_margins.clone()
-        b_margins_third[indices_high] = 1#b_margins[indices_high]
-        b_margins_third[indices_low] = 0
+        # Forward pass through the model and mean pooling
+        embeddings_1 = mean_pooling(model(b_ids_1, b_mask_1), b_mask_1)
+        embeddings_1_diff = mean_pooling(model(b_ids_1, b_mask_1), b_mask_1)
+        embeddings_2 = mean_pooling(model(b_ids_2, b_mask_2), b_mask_2)
+        embeddings_2_diff = mean_pooling(model(b_ids_2, b_mask_2), b_mask_2)
 
-    
-        ### FIRST EMBEDDING Matryoshka
-        embeddings_1_first = embeddings_1[:, :int(EMBEDDING_SIZE/4)]
-        embeddings_1_diff_first = embeddings_1_diff[:, :int(EMBEDDING_SIZE/4)]
-        embeddings_2_first = embeddings_2[:, :int(EMBEDDING_SIZE/4)]
-        embeddings_2_diff_first = embeddings_2_diff[:, :int(EMBEDDING_SIZE/4)]
+        # Calculate binary margin categories
+        b_margins_first = (b_margins >= 0.25).float()
+        b_margins_second = (b_margins >= 0.50).float()
+        b_margins_third = (b_margins >= 0.75).float()
+
+        # First level embeddings (1/4 size)
+        embeddings_1_first = embeddings_1[:, :int(EMBEDDING_SIZE / 4)]
+        embeddings_1_diff_first = embeddings_1_diff[:, :int(EMBEDDING_SIZE / 4)]
+        embeddings_2_first = embeddings_2[:, :int(EMBEDDING_SIZE / 4)]
+        embeddings_2_diff_first = embeddings_2_diff[:, :int(EMBEDDING_SIZE / 4)]
+        embeddings_1_data_norm_first = embeddings_1_first / embeddings_1_first.norm(dim=1, keepdim=True)
+        embeddings_1_diff_data_norm_first = embeddings_1_diff_first / embeddings_1_diff_first.norm(dim=1, keepdim=True)
+        embeddings_2_data_norm_first = embeddings_2_first / embeddings_2_first.norm(dim=1, keepdim=True)
+        embeddings_2_diff_data_norm_first = embeddings_2_diff_first / embeddings_2_diff_first.norm(dim=1, keepdim=True)
+
+        # Second level embeddings (1/2 size)
+        embeddings_1_second = embeddings_1[:, :int(EMBEDDING_SIZE / 2)]
+        embeddings_1_diff_second = embeddings_1_diff[:, :int(EMBEDDING_SIZE / 2)]
+        embeddings_2_second = embeddings_2[:, :int(EMBEDDING_SIZE / 2)]
+        embeddings_2_diff_second = embeddings_2_diff[:, :int(EMBEDDING_SIZE / 2)]
+        embeddings_1_data_norm_second = embeddings_1_second / embeddings_1_second.norm(dim=1, keepdim=True)
+        embeddings_1_diff_data_norm_second = embeddings_1_diff_second / embeddings_1_diff_second.norm(dim=1, keepdim=True)
+        embeddings_2_data_norm_second = embeddings_2_second / embeddings_2_second.norm(dim=1, keepdim=True)
+        embeddings_2_diff_data_norm_second = embeddings_2_diff_second / embeddings_2_diff_second.norm(dim=1, keepdim=True)
+
+        # Third level embeddings (full size)
+        embeddings_1_third = embeddings_1[:, :int(EMBEDDING_SIZE / 1)]
+        embeddings_1_diff_third = embeddings_1_diff[:, :int(EMBEDDING_SIZE / 1)]
+        embeddings_2_third = embeddings_2[:, :int(EMBEDDING_SIZE / 1)]
+        embeddings_2_diff_third = embeddings_2_diff[:, :int(EMBEDDING_SIZE / 1)]
+        embeddings_1_data_norm_third = embeddings_1_third / embeddings_1_third.norm(dim=1, keepdim=True)
+        embeddings_1_diff_data_norm_third = embeddings_1_diff_third / embeddings_1_diff_third.norm(dim=1, keepdim=True)
+        embeddings_2_data_norm_third = embeddings_2_third / embeddings_2_third.norm(dim=1, keepdim=True)
+        embeddings_2_diff_data_norm_third = embeddings_2_diff_third / embeddings_2_diff_third.norm(dim=1, keepdim=True)
+
+        # Calculate combined loss across different embedding levels
+        loss = calculate_cosine_angle_loss(
+            embeddings_1_data_norm_first, embeddings_1_diff_data_norm_first,
+            embeddings_2_data_norm_first, embeddings_2_diff_data_norm_first,
+            b_margins_first, int(EMBEDDING_SIZE / 4)
+        ) / BATCH_SIZE
+        loss += calculate_cosine_angle_loss(
+            embeddings_1_data_norm_second, embeddings_1_diff_data_norm_second,
+            embeddings_2_data_norm_second, embeddings_2_diff_data_norm_second,
+            b_margins_second, int(EMBEDDING_SIZE / 2)
+        ) / BATCH_SIZE
+        loss += calculate_cosine_angle_loss(
+            embeddings_1_data_norm_third, embeddings_1_diff_data_norm_third,
+            embeddings_2_data_norm_third, embeddings_2_diff_data_norm_third,
+            b_margins_third, int(EMBEDDING_SIZE / 1)
+        ) / BATCH_SIZE
         
-        ## Normalize
-        embeddings_1_norms_first = embeddings_1_first.norm(dim=1, keepdim=True)
-        embeddings_1_data_norm_first = embeddings_1_first / embeddings_1_norms_first
-        embeddings_1_diff_norms_first = embeddings_1_diff_first.norm(dim=1, keepdim=True)
-        embeddings_1_diff_data_norm_first = embeddings_1_diff_first / embeddings_1_diff_norms_first
-        embeddings_2_norms_first = embeddings_2_first.norm(dim=1, keepdim=True)
-        embeddings_2_data_norm_first = embeddings_2_first / embeddings_2_norms_first
-        embeddings_2_diff_norms_first = embeddings_2_diff_first.norm(dim=1, keepdim=True)
-        embeddings_2_diff_data_norm_first = embeddings_2_diff_first / embeddings_2_diff_norms_first
-
-        ### SECOND EMBEDDING Matryoshka
-        embeddings_1_second = embeddings_1[:, :int(EMBEDDING_SIZE/2)]
-        embeddings_1_diff_second  = embeddings_1_diff[:, :int(EMBEDDING_SIZE/2)]
-        embeddings_2_second  = embeddings_2[:, :int(EMBEDDING_SIZE/2)]
-        embeddings_2_diff_second = embeddings_2_diff[:, :int(EMBEDDING_SIZE/2)]
+        num_batches += 1  # Increment batch counter
         
-        ## Normalize
-        embeddings_1_norms_second = embeddings_1_second.norm(dim=1, keepdim=True)
-        embeddings_1_data_norm_second = embeddings_1_second / embeddings_1_norms_second
-        embeddings_1_diff_norms_second = embeddings_1_diff_second.norm(dim=1, keepdim=True)
-        embeddings_1_diff_data_norm_second = embeddings_1_diff_second / embeddings_1_diff_norms_second
-        embeddings_2_norms_second = embeddings_2_second.norm(dim=1, keepdim=True)
-        embeddings_2_data_norm_second = embeddings_2_second / embeddings_2_norms_second
-        embeddings_2_diff_norms_second = embeddings_2_diff_second.norm(dim=1, keepdim=True)
-        embeddings_2_diff_data_norm_second = embeddings_2_diff_second / embeddings_2_diff_norms_second
-
-
-        ### THIRD EMBEDDING Matryoshka
-        embeddings_1_third = embeddings_1[:, :int(EMBEDDING_SIZE/1)]
-        embeddings_1_diff_third  = embeddings_1_diff[:, :int(EMBEDDING_SIZE/1)]
-        embeddings_2_third  = embeddings_2[:, :int(EMBEDDING_SIZE/1)]
-        embeddings_2_diff_third = embeddings_2_diff[:, :int(EMBEDDING_SIZE/1)]
-        
-        ## Normalize
-        embeddings_1_norms_third = embeddings_1_third.norm(dim=1, keepdim=True)
-        embeddings_1_data_norm_third = embeddings_1_third / embeddings_1_norms_third
-        embeddings_1_diff_norms_third = embeddings_1_diff_third.norm(dim=1, keepdim=True)
-        embeddings_1_diff_data_norm_third = embeddings_1_diff_third / embeddings_1_diff_norms_third
-        embeddings_2_norms_third = embeddings_2_third.norm(dim=1, keepdim=True)
-        embeddings_2_data_norm_third = embeddings_2_third / embeddings_2_norms_third
-        embeddings_2_diff_norms_third = embeddings_2_diff_third.norm(dim=1, keepdim=True)
-        embeddings_2_diff_data_norm_third = embeddings_2_diff_third / embeddings_2_diff_norms_third
-
-
-        
-
-        loss = calculate_cosine_angle_loss(embeddings_1_data_norm_first, embeddings_1_diff_data_norm_first, embeddings_2_data_norm_first, embeddings_2_diff_data_norm_first,b_margins_first,int(EMBEDDING_SIZE/4))/BATCH_SIZE
-        loss += calculate_cosine_angle_loss(embeddings_1_data_norm_second, embeddings_1_diff_data_norm_second, embeddings_2_data_norm_second, embeddings_2_diff_data_norm_second,b_margins_second,int(EMBEDDING_SIZE/2))/BATCH_SIZE
-        loss += calculate_cosine_angle_loss(embeddings_1_data_norm_third, embeddings_1_diff_data_norm_third, embeddings_2_data_norm_third, embeddings_2_diff_data_norm_third,b_margins_third,int(EMBEDDING_SIZE/1))/BATCH_SIZE
-        
-        num_batches+=1
-        
-
+        # Backpropagation and optimization step
         loss.backward()
         opt.step()
+
+        # Log the training loss
         try:
-            f = open('multilingual-matryoshka-e5-calculate_cosine_angle_loss-scne-loss-train_loss-fixed.txt','a+')
-            f.write(str(loss.item())+"\n")
-            f.close()
+            with open('loss.txt', 'a+') as f:
+                f.write(str(loss.item()) + "\n")
         except Exception as e:
             print(e)
+    
+    # Evaluate the model on the validation set and save if it's the best one
     try:
-        validation_loss = model_eval(val_data_dataloader,model, device) 
+        validation_loss = model_eval(val_data_dataloader, model, device)
         if validation_loss < minimum_loss:
-                try:
-                    torch.save(model.state_dict(), 'multilingual-matryoshka-e5-calculate_cosine_angle_loss-fixed-regular/multilingual-20240816-matryoshka-e5-calculate_cosine_angle_loss-base'+str(epoch)+'-'+str(num_batches)+'.pt')
-                except Exception as e:
-                    print(e)
-                minium_loss = validation_loss
+            try:
+                torch.save(model.state_dict(), f'FOLDER/model-{epoch}-{num_batches}.pt')
+            except Exception as e:
+                print(e)
+            minimum_loss = validation_loss  # Update minimum loss
     except Exception as e:
         print(e)
-
-
-
-
-
