@@ -15,7 +15,7 @@ embeddings = []
 old_urls = []
 
 # Load embeddings from a pickle file
-with open('/mnt/projects/qanon_proj/Spinda/testing-original-sts22-mat-aligned-multilingual-e5-base-20240814-embeddings.obj', 'rb') as f:
+with open('LOCATION OF EMBEDDING', 'rb') as f:
     ids_to_embeddings = pickle.load(f)
 
 # Extract embeddings and their corresponding IDs
