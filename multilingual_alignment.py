@@ -257,3 +257,79 @@ def model_eval(dataloader, student_model, teacher_model, device):
                 total_loss += float(loss.item())
         
         return total_loss
+
+
+
+# Create a directory to save the model if it doesn't exist
+if not os.path.isdir('FOLDER'):
+    os.mkdir('FOLDER')
+
+# Initialize variables
+minimum_loss = float('inf')  # Start with a very high value for minimum loss
+EMBEDDING_SIZE = 768  # Size of the embeddings
+mse_loss_fn = nn.MSELoss()  # Mean Squared Error loss function
+accumulation_steps = 4  # Number of steps for gradient accumulation
+
+# Training loop
+for epoch in range(0, 99999999):  # Infinite loop to train the model
+    num_batches = 0  # Initialize batch counter
+    student_model = student_model.train()  # Set the model to training mode
+    
+    # Loop over batches
+    for batch in tqdm(train_data_dataloader, desc=f'train-{epoch}'):
+        # Extract input data from batch
+        b_ids_1, b_mask_1, b_ids_3, b_mask_3, b_margins = (
+            batch['text_pair1_token_ids'], batch['text_pair1_attention_mask'],
+            batch['text_pair3_token_ids'], batch['text_pair3_attention_mask'],
+            batch['margins']
+        )
+
+        # Move data to GPU (or CPU if GPU is not available)
+        b_ids_1, b_mask_1 = b_ids_1.to(device), b_mask_1.to(device)
+        b_ids_3, b_mask_3 = b_ids_3.to(device), b_mask_3.to(device)
+        b_margins = torch.tensor(b_margins).to(device)
+
+        # Forward pass: Get the embeddings from the student and teacher models
+        embeddings_1 = student_model(b_ids_1, b_mask_1)
+        embeddings_1 = mean_pooling(embeddings_1, b_mask_1)
+        teacher_embeddings_1 = teacher_model(b_ids_3, b_mask_3)
+        teacher_embeddings_1 = mean_pooling(teacher_embeddings_1, b_mask_3)
+
+        # Calculate losses at different embedding sizes
+        # 1st embedding size (quarter of the full size)
+        embeddings_1_student_1 = F.normalize(embeddings_1[:, :int(EMBEDDING_SIZE / 4)], p=2, dim=1)
+        embeddings_1_teacher_1 = F.normalize(teacher_embeddings_1[:, :int(EMBEDDING_SIZE / 4)], p=2, dim=1)
+        cosine_similarity_student_1 = torch.sum(embeddings_1_teacher_1 * embeddings_1_teacher_1, dim=1)
+        loss_1 = mse_loss_fn(cosine_similarity_student_1, b_margins)
+
+        # 2nd embedding size (half of the full size)
+        embeddings_1_student_2 = F.normalize(embeddings_1[:, :int(EMBEDDING_SIZE / 2)], p=2, dim=1)
+        embeddings_1_teacher_2 = F.normalize(teacher_embeddings_1[:, :int(EMBEDDING_SIZE / 2)], p=2, dim=1)
+        cosine_similarity_student_2 = torch.sum(embeddings_1_student_2 * embeddings_1_teacher_2, dim=1)
+        loss_2 = mse_loss_fn(cosine_similarity_student_2, b_margins)
+
+        # Full embedding size
+        embeddings_1_student_3 = F.normalize(embeddings_1[:, :int(EMBEDDING_SIZE / 1)], p=2, dim=1)
+        embeddings_1_teacher_3 = F.normalize(teacher_embeddings_1[:, :int(EMBEDDING_SIZE / 1)], p=2, dim=1)
+        cosine_similarity_student_3 = torch.sum(embeddings_1_student_3 * embeddings_1_teacher_3, dim=1)
+        loss_3 = mse_loss_fn(cosine_similarity_student_3, b_margins)
+
+        # Aggregate losses and normalize by batch size
+        loss = (loss_1 + loss_2 + loss_3) / BATCH_SIZE
+
+        # Log the loss to a file
+        with open('fixed-multilingual_alignment_loss-20240814.txt', 'a+') as f:
+            f.write(str(loss.item()) + "\n")
+        print(loss.item())
+
+        num_batches += 1
+
+        # Backward pass: Compute gradients and update model parameters
+        loss.backward()
+        opt.step()
+        opt.zero_grad()
+    
+    validation_loss = model_eval(val_data_dataloader, student_model, teacher_model, device)
+    if validation_loss < minimum_loss:
+        torch.save(student_model.state_dict(), f'FOLDER/multilingual_alignment-{epoch}-{num_batches}.pt')# Save the model at the end of each epoch
+    
