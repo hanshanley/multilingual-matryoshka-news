@@ -362,93 +362,90 @@ opt = torch.optim.AdamW(model.parameters(), lr=2e-5)
 
 def model_eval(dataloader, model, device):
     """
-    Evaluate the model on a given dataset using the specified device.
-
+    Evaluate the model on the provided dataloader.
+    
     Args:
-    - dataloader: DataLoader object containing the validation data.
-    - model: The PyTorch model to evaluate.
-    - device: The device (CPU/GPU) on which the model is being evaluated.
-
+    - dataloader (DataLoader): The data loader containing validation data.
+    - model (nn.Module): The model to evaluate.
+    - device (torch.device): The device to run the model on (CPU or GPU).
+    
     Returns:
-    - total_loss: The total loss over the entire validation dataset.
+    - total_loss (float): The total loss over the validation dataset.
     """
-    model.eval()  # Set the model to evaluation mode (disables dropout, etc.)
-    with torch.no_grad():  # Disable gradient calculation for evaluation
+    
+    model.eval()  # Switch the model to evaluation mode (disables dropout, etc.)
+    
+    with torch.no_grad():  # Disable gradient computation
         total_loss = 0 
-        for batch in tqdm(dataloader, desc=f'Validation Epoch {epoch}'):
-            # Unpack the batch data and move to the specified device
+        
+        # Iterate over batches in the dataloader
+        for batch in tqdm(dataloader, desc='Evaluation in progress'):
+            # Extract batch data and move to the specified device
             b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_margins = (
                 batch['text_pair1_token_ids'],
-                batch['text_pair1_attention_mask'],
-                batch['text_pair2_token_ids'],
+                batch['text_pair1_attention_mask'], 
+                batch['text_pair2_token_ids'], 
                 batch['text_pair2_attention_mask'],
                 batch['margins']
             )
-            b_ids_1, b_mask_1 = b_ids_1.to(device), b_mask_1.to(device)
-            b_ids_2, b_mask_2 = b_ids_2.to(device), b_mask_2.to(device)
-            b_margins = torch.tensor(b_margins)
-
-            # Forward pass through the model and mean pooling
-            embeddings_1 = mean_pooling(model(b_ids_1, b_mask_1), b_mask_1)
-            embeddings_1_diff = mean_pooling(model(b_ids_1, b_mask_1), b_mask_1)
-            embeddings_2 = mean_pooling(model(b_ids_2, b_mask_2), b_mask_2)
-            embeddings_2_diff = mean_pooling(model(b_ids_2, b_mask_2), b_mask_2)
-
-            # Calculate binary margin categories
-            b_margins_first = (b_margins >= 0.25).float()
-            b_margins_second = (b_margins >= 0.50).float()
-            b_margins_third = (b_margins >= 0.75).float()
-
-            # First level embeddings (1/4 size)
-            embeddings_1_first = embeddings_1[:, :int(EMBEDDING_SIZE / 4)]
-            embeddings_1_diff_first = embeddings_1_diff[:, :int(EMBEDDING_SIZE / 4)]
-            embeddings_2_first = embeddings_2[:, :int(EMBEDDING_SIZE / 4)]
-            embeddings_2_diff_first = embeddings_2_diff[:, :int(EMBEDDING_SIZE / 4)]
-            embeddings_1_data_norm_first = embeddings_1_first / embeddings_1_first.norm(dim=1, keepdim=True)
-            embeddings_1_diff_data_norm_first = embeddings_1_diff_first / embeddings_1_diff_first.norm(dim=1, keepdim=True)
-            embeddings_2_data_norm_first = embeddings_2_first / embeddings_2_first.norm(dim=1, keepdim=True)
-            embeddings_2_diff_data_norm_first = embeddings_2_diff_first / embeddings_2_diff_first.norm(dim=1, keepdim=True)
-
-            # Second level embeddings (1/2 size)
-            embeddings_1_second = embeddings_1[:, :int(EMBEDDING_SIZE / 2)]
-            embeddings_1_diff_second = embeddings_1_diff[:, :int(EMBEDDING_SIZE / 2)]
-            embeddings_2_second = embeddings_2[:, :int(EMBEDDING_SIZE / 2)]
-            embeddings_2_diff_second = embeddings_2_diff[:, :int(EMBEDDING_SIZE / 2)]
-            embeddings_1_data_norm_second = embeddings_1_second / embeddings_1_second.norm(dim=1, keepdim=True)
-            embeddings_1_diff_data_norm_second = embeddings_1_diff_second / embeddings_1_diff_second.norm(dim=1, keepdim=True)
-            embeddings_2_data_norm_second = embeddings_2_second / embeddings_2_second.norm(dim=1, keepdim=True)
-            embeddings_2_diff_data_norm_second = embeddings_2_diff_second / embeddings_2_diff_second.norm(dim=1, keepdim=True)
-
-            # Third level embeddings (full size)
-            embeddings_1_third = embeddings_1[:, :int(EMBEDDING_SIZE / 1)]
-            embeddings_1_diff_third = embeddings_1_diff[:, :int(EMBEDDING_SIZE / 1)]
-            embeddings_2_third = embeddings_2[:, :int(EMBEDDING_SIZE / 1)]
-            embeddings_2_diff_third = embeddings_2_diff[:, :int(EMBEDDING_SIZE / 1)]
-            embeddings_1_data_norm_third = embeddings_1_third / embeddings_1_third.norm(dim=1, keepdim=True)
-            embeddings_1_diff_data_norm_third = embeddings_1_diff_third / embeddings_1_diff_third.norm(dim=1, keepdim=True)
-            embeddings_2_data_norm_third = embeddings_2_third / embeddings_2_third.norm(dim=1, keepdim=True)
-            embeddings_2_diff_data_norm_third = embeddings_2_diff_third / embeddings_2_diff_third.norm(dim=1, keepdim=True)
-
-            # Calculate combined loss across different embedding levels
-            loss = calculate_cosine_angle_loss(
-                embeddings_1_data_norm_first, embeddings_1_diff_data_norm_first,
-                embeddings_2_data_norm_first, embeddings_2_diff_data_norm_first,
-                b_margins_first, int(EMBEDDING_SIZE / 4)
-            ) / BATCH_SIZE
-            loss += calculate_cosine_angle_loss(
-                embeddings_1_data_norm_second, embeddings_1_diff_data_norm_second,
-                embeddings_2_data_norm_second, embeddings_2_diff_data_norm_second,
-                b_margins_second, int(EMBEDDING_SIZE / 2)
-            ) / BATCH_SIZE
-            loss += calculate_cosine_angle_loss(
-                embeddings_1_data_norm_third, embeddings_1_diff_data_norm_third,
-                embeddings_2_data_norm_third, embeddings_2_diff_data_norm_third,
-                b_margins_third, int(EMBEDDING_SIZE / 1)
-            ) / BATCH_SIZE
             
-            total_loss += float(loss.item())  # Accumulate the loss for this batch
+            b_ids_1 = b_ids_1.to(device)
+            b_mask_1 = b_mask_1.to(device)
+            b_ids_2 = b_ids_2.to(device)
+            b_mask_2 = b_mask_2.to(device)
+            b_margins = torch.tensor(b_margins).to(device)
+
+            # Get embeddings for the first and second text pairs
+            embeddings_1 = model(b_ids_1, b_mask_1)
+            embeddings_1 = mean_pooling(embeddings_1, b_mask_1)
+        
+            embeddings_1_diff = model(b_ids_1, b_mask_1)
+            embeddings_1_diff = mean_pooling(embeddings_1_diff, b_mask_1)
+        
+            embeddings_2 = model(b_ids_2, b_mask_2)
+            embeddings_2 = mean_pooling(embeddings_2, b_mask_2)
+        
+            embeddings_2_diff = model(b_ids_2, b_mask_2)
+            embeddings_2_diff = mean_pooling(embeddings_2_diff, b_mask_2)
+
+            # Compute third embeddings (Matryoshka approach)
+            embeddings_1_third = embeddings_1[:, :int(EMBEDDING_SIZE/1)]
+            embeddings_1_diff_third  = embeddings_1_diff[:, :int(EMBEDDING_SIZE/1)]
+            embeddings_2_third  = embeddings_2[:, :int(EMBEDDING_SIZE/1)]
+            embeddings_2_diff_third = embeddings_2_diff[:, :int(EMBEDDING_SIZE/1)]
+            
+            # Normalize embeddings
+            embeddings_1_norms_third = embeddings_1_third.norm(dim=1, keepdim=True)
+            embeddings_1_data_norm_third = embeddings_1_third / embeddings_1_norms_third
+            
+            embeddings_1_diff_norms_third = embeddings_1_diff_third.norm(dim=1, keepdim=True)
+            embeddings_1_diff_data_norm_third = embeddings_1_diff_third / embeddings_1_diff_norms_third
+            
+            embeddings_2_norms_third = embeddings_2_third.norm(dim=1, keepdim=True)
+            embeddings_2_data_norm_third = embeddings_2_third / embeddings_2_norms_third
+            
+            embeddings_2_diff_norms_third = embeddings_2_diff_third.norm(dim=1, keepdim=True)
+            embeddings_2_diff_data_norm_third = embeddings_2_diff_third / embeddings_2_diff_norms_third
+
+            # Adjust margins for high-margin cases
+            indices_high = (b_margins == 0.75).nonzero(as_tuple=True)[0]
+            b_margins_third = b_margins.clone()
+            b_margins_third[indices_high] = 1
     
-        return total_loss  # Return the total loss over the entire validation dataset
+            # Calculate the loss using cosine angle difference
+            loss = calculate_cosine_angle_loss(
+                embeddings_1_data_norm_third, 
+                embeddings_1_diff_data_norm_third, 
+                embeddings_2_data_norm_third, 
+                embeddings_2_diff_data_norm_third,
+                b_margins_third,
+                int(EMBEDDING_SIZE/1)
+            ) / BATCH_SIZE
+        
+            total_loss += float(loss.item())  # Accumulate the loss
+    
+        return total_loss  # Return the total loss over the dataset
+
 
 
 # Directory setup for saving models
