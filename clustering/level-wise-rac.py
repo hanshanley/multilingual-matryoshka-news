@@ -1,5 +1,5 @@
 '''
-Hierarchical Clustering of Embeddings Using RAC++ with Multi-Layer Centroid Calculation and Normalization
+Hierarchical Clustering of Embeddings Using RAC++ with Multi-Layer Centroid Calculation and Matryoshka Embeddings
 
 This script performs hierarchical clustering on high-dimensional embeddings using the RAC++ clustering algorithm.
 The process involves three layers of clustering, where embeddings are first grouped and then progressively
