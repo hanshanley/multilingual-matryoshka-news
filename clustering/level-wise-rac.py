@@ -1,6 +1,12 @@
-#!/usr/bin/env python
-# coding: utf-8
+'''
+Hierarchical Clustering of Embeddings Using RAC++ with Multi-Layer Centroid Calculation and Normalization
 
+This script performs hierarchical clustering on high-dimensional embeddings using the RAC++ clustering algorithm.
+The process involves three layers of clustering, where embeddings are first grouped and then progressively
+refined through the computation of centroids at each layer. 
+
+See Methodology Section for Additional details. 
+'''
 # Import necessary libraries
 import racplusplus
 import pickle
