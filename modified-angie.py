@@ -453,104 +453,119 @@ import os
 if not os.path.isdir('FOLDER'):
     os.mkdir('FOLDER')
 
-# Training loop
-minimum_loss = float('inf')  # Initialize minimum loss as infinity
+import torch
+from tqdm import tqdm
+
+# Initialize epoch count and set a very high initial minimum loss value
+epoch = 0
+minimum_loss = float('inf')
+
+# Loop over epochs (up to a very large number, acting as an infinite loop until manually stopped)
 for epoch in range(0, 1000000):
-    num_batches = 0 
+    num_batches = 0  # Counter for the number of batches processed
     model.train()  # Set the model to training mode
+
+    # Iterate over batches in the training dataloader
     for batch in tqdm(train_data_dataloader, desc=f'train-{epoch}'):
-        # Unpack the batch data and move to the specified device
+        # Extract batch data and move to the specified device (e.g., GPU)
         b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_margins = (
             batch['text_pair1_token_ids'],
-            batch['text_pair1_attention_mask'],
-            batch['text_pair2_token_ids'],
-            batch['text_pair2_attention_mask'],
+            batch['text_pair1_attention_mask'], 
+            batch['text_pair2_token_ids'], 
+            batch['text_pair2_attention_mask'], 
             batch['margins']
         )
-        opt.zero_grad()  # Zero the gradients before backpropagation
+        
+        # Reset the gradients of the optimizer
+        opt.zero_grad()
+
+        # Move the data to the specified device
         b_ids_1, b_mask_1 = b_ids_1.to(device), b_mask_1.to(device)
         b_ids_2, b_mask_2 = b_ids_2.to(device), b_mask_2.to(device)
-        b_margins = torch.tensor(b_margins)
+        b_margins = torch.tensor(b_margins).to(device)
 
-        # Forward pass through the model and mean pooling
-        embeddings_1 = mean_pooling(model(b_ids_1, b_mask_1), b_mask_1)
-        embeddings_1_diff = mean_pooling(model(b_ids_1, b_mask_1), b_mask_1)
-        embeddings_2 = mean_pooling(model(b_ids_2, b_mask_2), b_mask_2)
-        embeddings_2_diff = mean_pooling(model(b_ids_2, b_mask_2), b_mask_2)
+        # Get embeddings for the first and second text pairs
+        embeddings_1 = model(b_ids_1, b_mask_1)
+        embeddings_1 = mean_pooling(embeddings_1, b_mask_1)
+    
+        embeddings_1_diff = model(b_ids_1, b_mask_1)
+        embeddings_1_diff = mean_pooling(embeddings_1_diff, b_mask_1)
+    
+        embeddings_2 = model(b_ids_2, b_mask_2)
+        embeddings_2 = mean_pooling(embeddings_2, b_mask_2)
+    
+        embeddings_2_diff = model(b_ids_2, b_mask_2)
+        embeddings_2_diff = mean_pooling(embeddings_2_diff, b_mask_2)
 
-        # Calculate binary margin categories
-        b_margins_first = (b_margins >= 0.25).float()
-        b_margins_second = (b_margins >= 0.50).float()
-        b_margins_third = (b_margins >= 0.75).float()
-
-        # First level embeddings (1/4 size)
-        embeddings_1_first = embeddings_1[:, :int(EMBEDDING_SIZE / 4)]
-        embeddings_1_diff_first = embeddings_1_diff[:, :int(EMBEDDING_SIZE / 4)]
-        embeddings_2_first = embeddings_2[:, :int(EMBEDDING_SIZE / 4)]
-        embeddings_2_diff_first = embeddings_2_diff[:, :int(EMBEDDING_SIZE / 4)]
-        embeddings_1_data_norm_first = embeddings_1_first / embeddings_1_first.norm(dim=1, keepdim=True)
-        embeddings_1_diff_data_norm_first = embeddings_1_diff_first / embeddings_1_diff_first.norm(dim=1, keepdim=True)
-        embeddings_2_data_norm_first = embeddings_2_first / embeddings_2_first.norm(dim=1, keepdim=True)
-        embeddings_2_diff_data_norm_first = embeddings_2_diff_first / embeddings_2_diff_first.norm(dim=1, keepdim=True)
-
-        # Second level embeddings (1/2 size)
-        embeddings_1_second = embeddings_1[:, :int(EMBEDDING_SIZE / 2)]
-        embeddings_1_diff_second = embeddings_1_diff[:, :int(EMBEDDING_SIZE / 2)]
-        embeddings_2_second = embeddings_2[:, :int(EMBEDDING_SIZE / 2)]
-        embeddings_2_diff_second = embeddings_2_diff[:, :int(EMBEDDING_SIZE / 2)]
-        embeddings_1_data_norm_second = embeddings_1_second / embeddings_1_second.norm(dim=1, keepdim=True)
-        embeddings_1_diff_data_norm_second = embeddings_1_diff_second / embeddings_1_diff_second.norm(dim=1, keepdim=True)
-        embeddings_2_data_norm_second = embeddings_2_second / embeddings_2_second.norm(dim=1, keepdim=True)
-        embeddings_2_diff_data_norm_second = embeddings_2_diff_second / embeddings_2_diff_second.norm(dim=1, keepdim=True)
-
-        # Third level embeddings (full size)
+        # Compute third embeddings (Matryoshka approach)
         embeddings_1_third = embeddings_1[:, :int(EMBEDDING_SIZE / 1)]
         embeddings_1_diff_third = embeddings_1_diff[:, :int(EMBEDDING_SIZE / 1)]
         embeddings_2_third = embeddings_2[:, :int(EMBEDDING_SIZE / 1)]
         embeddings_2_diff_third = embeddings_2_diff[:, :int(EMBEDDING_SIZE / 1)]
-        embeddings_1_data_norm_third = embeddings_1_third / embeddings_1_third.norm(dim=1, keepdim=True)
-        embeddings_1_diff_data_norm_third = embeddings_1_diff_third / embeddings_1_diff_third.norm(dim=1, keepdim=True)
-        embeddings_2_data_norm_third = embeddings_2_third / embeddings_2_third.norm(dim=1, keepdim=True)
-        embeddings_2_diff_data_norm_third = embeddings_2_diff_third / embeddings_2_diff_third.norm(dim=1, keepdim=True)
+        
+        # Normalize the embeddings
+        embeddings_1_norms_third = embeddings_1_third.norm(dim=1, keepdim=True)
+        embeddings_1_data_norm_third = embeddings_1_third / embeddings_1_norms_third
+        
+        embeddings_1_diff_norms_third = embeddings_1_diff_third.norm(dim=1, keepdim=True)
+        embeddings_1_diff_data_norm_third = embeddings_1_diff_third / embeddings_1_diff_norms_third
+        
+        embeddings_2_norms_third = embeddings_2_third.norm(dim=1, keepdim=True)
+        embeddings_2_data_norm_third = embeddings_2_third / embeddings_2_norms_third
+        
+        embeddings_2_diff_norms_third = embeddings_2_diff_third.norm(dim=1, keepdim=True)
+        embeddings_2_diff_data_norm_third = embeddings_2_diff_third / embeddings_2_diff_norms_third
 
-        # Calculate combined loss across different embedding levels
+        # Adjust margins for high-margin cases
+        indices_high = (b_margins == 0.75).nonzero(as_tuple=True)[0]
+        b_margins_third = b_margins.clone()
+        b_margins_third[indices_high] = 1
+
+        # Calculate the loss using cosine angle difference and normalize by batch size
         loss = calculate_cosine_angle_loss(
-            embeddings_1_data_norm_first, embeddings_1_diff_data_norm_first,
-            embeddings_2_data_norm_first, embeddings_2_diff_data_norm_first,
-            b_margins_first, int(EMBEDDING_SIZE / 4)
-        ) / BATCH_SIZE
-        loss += calculate_cosine_angle_loss(
-            embeddings_1_data_norm_second, embeddings_1_diff_data_norm_second,
-            embeddings_2_data_norm_second, embeddings_2_diff_data_norm_second,
-            b_margins_second, int(EMBEDDING_SIZE / 2)
-        ) / BATCH_SIZE
-        loss += calculate_cosine_angle_loss(
-            embeddings_1_data_norm_third, embeddings_1_diff_data_norm_third,
-            embeddings_2_data_norm_third, embeddings_2_diff_data_norm_third,
-            b_margins_third, int(EMBEDDING_SIZE / 1)
+            embeddings_1_data_norm_third, 
+            embeddings_1_diff_data_norm_third, 
+            embeddings_2_data_norm_third, 
+            embeddings_2_diff_data_norm_third,
+            b_margins_third,
+            int(EMBEDDING_SIZE / 1)
         ) / BATCH_SIZE
         
-        num_batches += 1  # Increment batch counter
-        
-        # Backpropagation and optimization step
+        num_batches += 1  # Increment the batch counter
+
+        # Backpropagation and optimizer step
         loss.backward()
         opt.step()
 
-        # Log the training loss
+        # Periodically evaluate the model on validation data
+        if num_batches % 1000 == 0:
+            validation_loss = model_eval(val_data_dataloader, model, device)
+            if validation_loss < minimum_loss:
+                # Save the model if the validation loss decreases
+                try:
+                    torch.save(
+                        model.state_dict(), 
+                        f'non-multilingual-matryoshka-xlm-roberta-base-calculate_cosine_angle_loss-fixed-regular/20240808-non-multilingual-matryoshka-mpnet-calculate_cosine_angle_loss-base{epoch}-{num_batches}.pt'
+                    )
+                except Exception as e:
+                    print(e)
+                minimum_loss = validation_loss  # Update the minimum loss
+
+        # Log the training loss periodically
         try:
-            with open('loss.txt', 'a+') as f:
-                f.write(str(loss.item()) + "\n")
+            with open('non-multilingual-matryoshka-xlm-roberta-base-calculate_cosine_angle_loss-scne-loss-train_loss-fixed.txt', 'a+') as f:
+                f.write(f"{loss.item()}\n")
         except Exception as e:
             print(e)
+
+        # Print the loss for the current batch
+        print(loss.item())
     
-    # Evaluate the model on the validation set and save if it's the best one
+    # Save the model after each epoch
     try:
-        validation_loss = model_eval(val_data_dataloader, model, device)
-        if validation_loss < minimum_loss:
-            try:
-                torch.save(model.state_dict(), f'FOLDER/model-{epoch}-{num_batches}.pt')
-            except Exception as e:
-                print(e)
-            minimum_loss = validation_loss  # Update minimum loss
+        torch.save(
+            model.state_dict(), 
+            f'non-multilingual-matryoshka-xlm-roberta-base-calculate_cosine_angle_loss-fixed-regular/20240808-non-matryoshka-mpnet-base{epoch}.pt'
+        )
     except Exception as e:
         print(e)
