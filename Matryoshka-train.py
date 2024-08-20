@@ -1,3 +1,12 @@
+"""
+Purpose: This script processes a dataset of news article pairs to create labeled embeddings using a hierarchical clustering approach. 
+It includes data processing, dataset augmentation, custom sampling, and training of a multilingual embedding model using 
+cosine and angle loss functions. The script implements a training loop with validation and model checkpointing to identify 
+similar news articles across different levels of granularity.
+
+See the Methodology Section for additional details.
+"""
+
 # Import necessary libraries
 import pandas as pd
 import torch
