@@ -1,5 +1,14 @@
-#!/usr/bin/env python
-# coding: utf-8
+'''
+Hierarchical Clustering of Embeddings with Multi-Level FAISS Indexing and Matryoshka Embeddings
+
+This script performs hierarchical clustering on a large set of embeddings using FAISS for efficient
+similarity search and clustering. The embeddings are organized into multiple layers, where each layer
+represents a different level of abstraction in the clustering process using matryoshka embeddings. The script includes functions to 
+create, update, and search FAISS indices, as well as to compute cluster centroids and assign embeddings 
+to different layers based on similarity thresholds.
+
+See Methodology Section for additional details. 
+'''
 
 import os 
 import faiss
