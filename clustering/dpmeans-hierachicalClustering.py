@@ -7,7 +7,7 @@ represents a different level of abstraction in the clustering process using matr
 create, update, and search FAISS indices, as well as to compute cluster centroids and assign embeddings 
 to different layers based on similarity thresholds.
 
-See Methodology Section for additional details. 
+See the Methodology Section for additional details. 
 '''
 
 import os 
