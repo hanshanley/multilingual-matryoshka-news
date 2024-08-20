@@ -278,3 +278,62 @@ def create_index(embeddings):
     index.train(current_embeddings)  # Train the index
     index.add(current_embeddings)  # Add the embeddings to the index
     return index
+
+
+
+
+# Initialize dictionaries to store hierarchical structures
+center_hierachy = {}
+center_hierachy_to_embeddings = {}
+center_hierachy_to_index = {}
+
+# Create the first level of hierarchy with embeddings of size 192
+center_hierachy_to_embeddings['level1'] = [embeddings[0][:192].reshape(1, 192)]
+faiss.normalize_L2(center_hierachy_to_embeddings['level1'][0])
+center_hierachy_to_embeddings['level1'][0] = center_hierachy_to_embeddings['level1'][0].reshape(192,)
+
+# Create the second level of hierarchy with embeddings of size 384
+center_hierachy_to_embeddings['level2'] = [embeddings[0][:384].reshape(1, 384)]
+faiss.normalize_L2(center_hierachy_to_embeddings['level2'][0])
+center_hierachy_to_embeddings['level2'][0] = center_hierachy_to_embeddings['level2'][0].reshape(384,)
+
+# Generate a random set of indices to start with
+current_indices = set(range(len(embeddings)))
+old_random_indices = np.random.choice(list(current_indices), min(30, len(current_indices)), replace=False)
+
+# Reshape embeddings for the third level hierarchy (full embedding size)
+old_random_indices = np.array(old_random_indices)
+embeddings = np.array(embeddings)
+center_hierachy_to_embeddings['level3'] = embeddings[old_random_indices].reshape(len(old_random_indices), 768)
+faiss.normalize_L2(center_hierachy_to_embeddings['level3'])
+center_hierachy_to_embeddings['level3'] = [center_hierachy_to_embeddings['level3'][i] for i in range(center_hierachy_to_embeddings['level3'].shape[0])]
+
+# Initialize GPU resources for FAISS
+res = faiss.StandardGpuResources()
+gc.collect()
+
+# Create FAISS indices for each level of the hierarchy
+for hier in center_hierachy_to_embeddings:
+    d = len(center_hierachy_to_embeddings[hier][0])
+    quantizer = faiss.IndexFlatIP(d)
+    nlist = 1  # Number of clusters for the index
+    index = faiss.IndexIVFFlat(quantizer, d, nlist, faiss.METRIC_INNER_PRODUCT)
+    index.nprobe = 1  # Number of clusters to search
+    current_embeddings = np.array(center_hierachy_to_embeddings[hier]).reshape(len(center_hierachy_to_embeddings[hier]), d)
+    current_embeddings = np.array(current_embeddings, dtype=np.float32)
+    faiss.normalize_L2(current_embeddings)
+    index.train(current_embeddings)
+    index.add(current_embeddings)
+    center_hierachy_to_index[hier] = index
+
+# Initialize dictionaries for layer indices
+indices_to_first_layer = {}
+indices_to_second_layer = {}
+indices_to_third_layer = {}
+
+# Deep copy embeddings for processing
+deep_copied_embeddings = np.array(embeddings).copy()
+
+# Initialize variables for clustering process
+current_baseline_index_to_check = 0
+similarities = [0.5,0.5,0.5]  # Similarity thresholds for the layers
