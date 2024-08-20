@@ -551,21 +551,21 @@ for epoch in range(0, 1000000):
                     print(e)
                 minimum_loss = validation_loss  # Update the minimum loss
 
-        # Log the training loss periodically
+        # Log the training loss
         try:
-            with open('non-multilingual-matryoshka-xlm-roberta-base-calculate_cosine_angle_loss-scne-loss-train_loss-fixed.txt', 'a+') as f:
-                f.write(f"{loss.item()}\n")
+            with open('loss.txt', 'a+') as f:
+                f.write(str(loss.item()) + "\n")
         except Exception as e:
             print(e)
-
-        # Print the loss for the current batch
-        print(loss.item())
     
-    # Save the model after each epoch
+    # Evaluate the model on the validation set and save if it's the best one
     try:
-        torch.save(
-            model.state_dict(), 
-            f'non-multilingual-matryoshka-xlm-roberta-base-calculate_cosine_angle_loss-fixed-regular/20240808-non-matryoshka-mpnet-base{epoch}.pt'
-        )
+        validation_loss = model_eval(val_data_dataloader, model, device)
+        if validation_loss < minimum_loss:
+            try:
+                torch.save(model.state_dict(), f'FOLDER/model-{epoch}-{num_batches}.pt')
+            except Exception as e:
+                print(e)
+            minimum_loss = validation_loss  # Update minimum loss
     except Exception as e:
         print(e)
