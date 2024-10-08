@@ -168,16 +168,20 @@ from collections import defaultdict
 import random
 from torch.utils.data import Sampler
 
+from collections import defaultdict
+import random
+from torch.utils.data import Sampler
+
 class NonRepeatingBatchSampler(Sampler):
     def __init__(self, labels, batch_size):
         self.labels = labels
         self.batch_size = batch_size
         self.index_to_labels = defaultdict(list)
-        
-        # Populate index_to_labels assuming each label contains at least two elements
+
+        # Organize labels
         for idx, label in enumerate(labels):
             if isinstance(label, (tuple, list)) and len(label) >= 2:
-                self.index_to_labels[idx].extend([label[0], label[1]])
+                self.index_to_labels[idx].extend(label[:2])  # Store the first two labels
             else:
                 raise ValueError("Expected each label to have at least two elements.")
         
@@ -186,27 +190,56 @@ class NonRepeatingBatchSampler(Sampler):
     def _create_batches(self):
         batches = []
         label_indices = list(self.index_to_labels.keys())
-        random.shuffle(label_indices)  # Shuffle the indices initially
+        random.shuffle(label_indices)
+
         current_batch = []
-        used_labels = set()  # Track labels that have already been used in the batch
+        current_labels = set()
+        leftovers = []
 
         for idx in label_indices:
             labels = self.index_to_labels[idx]
-            # Check if we can add this sample based on its labels
-            if labels[0] not in used_labels and labels[1] not in used_labels:
+
+            # Check if adding this index will repeat any label
+            if labels[0] not in current_labels and labels[1] not in current_labels:
                 current_batch.append(idx)
-                used_labels.update(labels)  # Add both labels to the set of used labels
-                # If we've filled up a batch, store it and reset the tracking
+                current_labels.update(labels)
+
+                # If we've reached the desired batch size, store the batch
                 if len(current_batch) == self.batch_size:
                     batches.append(current_batch)
                     current_batch = []
-                    used_labels.clear()
-            
-            # If we cannot form more full batches, exit early
-            if len(label_indices) - len(batches) * self.batch_size < self.batch_size:
-                break
+                    current_labels = set()
+            else:
+                # If it can't be added to the current batch, add to leftovers
+                leftovers.append(idx)
 
-        # If there's a partially filled batch remaining, it will be discarded
+        # Try to use leftovers to create additional batches
+        max_attempts = len(leftovers)  # To avoid infinite loop if no valid batches can be formed
+        attempts = 0
+        while leftovers and attempts < max_attempts:
+            idx = leftovers.pop(0)
+            labels = self.index_to_labels[idx]
+
+            # Try to add leftover indices to the current batch if possible
+            if labels[0] not in current_labels and labels[1] not in current_labels:
+                current_batch.append(idx)
+                current_labels.update(labels)
+            else:
+                # If it still can't be added, put it back to the end of leftovers
+                leftovers.append(idx)
+
+            # If we've reached the desired batch size, store the batch
+            if len(current_batch) == self.batch_size:
+                batches.append(current_batch)
+                current_batch = []
+                current_labels = set()
+            
+            attempts += 1
+
+        # Handle any remaining items that couldn't form a full batch
+        if current_batch:
+            batches.append(current_batch)
+
         return batches
 
     def __iter__(self):
