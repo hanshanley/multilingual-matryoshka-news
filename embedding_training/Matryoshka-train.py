@@ -164,37 +164,50 @@ train_labels = labels[:int(0.90 * len(labels))]
 val_labels = labels[int(0.90 * len(labels)):]
 
 # Define a custom sampler to create batches without repeating labels
+from collections import defaultdict
+import random
+from torch.utils.data import Sampler
+
 class NonRepeatingBatchSampler(Sampler):
     def __init__(self, labels, batch_size):
         self.labels = labels
         self.batch_size = batch_size
         self.index_to_labels = defaultdict(list)
-        
+
+        # Map each index to its label pair
         for idx, label in enumerate(labels):
-            self.index_to_labels[idx].append(label[0])
-            self.index_to_labels[idx].append(label[1])
-            
+            if isinstance(label, (tuple, list)) and len(label) >= 2:
+                self.index_to_labels[idx].extend([label[0], label[1]])
+            else:
+                raise ValueError("Expected each label to have at least two elements.")
+        
         self.batches = self._create_batches()
 
     def _create_batches(self):
         batches = []
         label_indices = list(self.index_to_labels.keys())
-        random.shuffle(label_indices)
-        current_batch = []
-        current_labels = set()
-        for idx in label_indices:
-            labels = self.index_to_labels[idx]
-            if labels[0] not in current_labels and labels[1] not in current_labels:
-                current_batch.append(idx)
-                current_labels.add(labels[0])
-                current_labels.add(labels[1])
-                if len(current_batch) == self.batch_size:
-                    batches.append(current_batch)
-                    current_batch = []
-                    current_labels = set()
-        if current_batch:
-            batches.append(current_batch)
+        unused_pairs = set(label_indices)
         
+        # Keep iterating until all pairs are used
+        while unused_pairs:
+            current_batch = []
+            current_labels = set()
+            batch_candidate_indices = list(unused_pairs)
+            random.shuffle(batch_candidate_indices)
+
+            for idx in batch_candidate_indices:
+                labels = self.index_to_labels[idx]
+                if labels[0] not in current_labels and labels[1] not in current_labels:
+                    current_batch.append(idx)
+                    current_labels.update(labels)  # Add both labels to the used set
+                    unused_pairs.remove(idx)  # Remove from unused set
+                    if len(current_batch) == self.batch_size:
+                        break
+
+            # Add completed batch
+            if current_batch:
+                batches.append(current_batch)
+
         return batches
 
     def __iter__(self):
@@ -204,6 +217,7 @@ class NonRepeatingBatchSampler(Sampler):
 
     def __len__(self):
         return len(self.batches)
+
 
 # Instantiate samplers for training and validation data
 train_sampler = NonRepeatingBatchSampler(train_labels, BATCH_SIZE)
