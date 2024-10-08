@@ -173,8 +173,8 @@ class NonRepeatingBatchSampler(Sampler):
         self.labels = labels
         self.batch_size = batch_size
         self.index_to_labels = defaultdict(list)
-
-        # Map each index to its label pair
+        
+        # Populate index_to_labels assuming each label contains at least two elements
         for idx, label in enumerate(labels):
             if isinstance(label, (tuple, list)) and len(label) >= 2:
                 self.index_to_labels[idx].extend([label[0], label[1]])
@@ -186,28 +186,27 @@ class NonRepeatingBatchSampler(Sampler):
     def _create_batches(self):
         batches = []
         label_indices = list(self.index_to_labels.keys())
-        unused_pairs = set(label_indices)
-        
-        # Keep iterating until all pairs are used
-        while unused_pairs:
-            current_batch = []
-            current_labels = set()
-            batch_candidate_indices = list(unused_pairs)
-            random.shuffle(batch_candidate_indices)
+        random.shuffle(label_indices)  # Shuffle the indices initially
+        current_batch = []
+        used_labels = set()  # Track labels that have already been used in the batch
 
-            for idx in batch_candidate_indices:
-                labels = self.index_to_labels[idx]
-                if labels[0] not in current_labels and labels[1] not in current_labels:
-                    current_batch.append(idx)
-                    current_labels.update(labels)  # Add both labels to the used set
-                    unused_pairs.remove(idx)  # Remove from unused set
-                    if len(current_batch) == self.batch_size:
-                        break
+        for idx in label_indices:
+            labels = self.index_to_labels[idx]
+            # Check if we can add this sample based on its labels
+            if labels[0] not in used_labels and labels[1] not in used_labels:
+                current_batch.append(idx)
+                used_labels.update(labels)  # Add both labels to the set of used labels
+                # If we've filled up a batch, store it and reset the tracking
+                if len(current_batch) == self.batch_size:
+                    batches.append(current_batch)
+                    current_batch = []
+                    used_labels.clear()
+            
+            # If we cannot form more full batches, exit early
+            if len(label_indices) - len(batches) * self.batch_size < self.batch_size:
+                break
 
-            # Add completed batch
-            if current_batch:
-                batches.append(current_batch)
-
+        # If there's a partially filled batch remaining, it will be discarded
         return batches
 
     def __iter__(self):
