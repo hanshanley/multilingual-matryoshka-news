@@ -187,7 +187,12 @@ def parse_args() -> TrainingConfig:
     parser.add_argument("--positive-margin-threshold", type=float, default=0.75, help="Margins above this threshold are treated as positive (set to 1.0).")
     parser.add_argument("--num-workers", type=int, default=0, help="Number of DataLoader workers.")
     parser.add_argument("--disable-label-sampler", action="store_true", help="Use simple shuffled batching instead of the custom label-balanced sampler.")
-    parser.add_argument("--labels-path", type=Path, default=None, help="Optional JSON file containing URL similarity labels.")
+    parser.add_argument(
+        "--labels-path",
+        type=Path,
+        default=Path("data/labels_semeval_2022_task_eight.json"),
+        help="JSON file containing URL similarity labels (defaults to data/labels_semeval_2022_task_eight.json).",
+    )
     parser.add_argument("--similarity-threshold", type=float, default=0.25, help="Edge weight >= threshold counts as similar.")
 
     args = parser.parse_args()
@@ -337,19 +342,10 @@ def build_label_lookup(
         for record in records:
             url_a = record.get("url_a")
             url_b = record.get("url_b")
-            margin = record.get("margin")
             if url_a is not None:
                 graph.setdefault(url_a, set())
             if url_b is not None:
                 graph.setdefault(url_b, set())
-            if (
-                url_a is not None
-                and url_b is not None
-                and margin is not None
-                and float(margin) >= threshold
-            ):
-                graph[url_a].add(url_b)
-                graph[url_b].add(url_a)
 
     if not graph:
         return {}

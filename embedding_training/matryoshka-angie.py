@@ -189,7 +189,12 @@ def parse_args() -> TrainingConfig:
         default=10_000,
         help="Validate every N update steps (set <=0 to skip intermediate validation).",
     )
-    parser.add_argument("--labels-path", type=Path, default=None, help="Optional JSON file containing URL similarity labels.")
+    parser.add_argument(
+        "--labels-path",
+        type=Path,
+        default=Path("data/labels_semeval_2022_task_eight.json"),
+        help="JSON file containing URL similarity labels (defaults to data/labels_semeval_2022_task_eight.json).",
+    )
     parser.add_argument("--similarity-threshold", type=float, default=0.25, help="Edge weight >= threshold counts as similar.")
     parser.add_argument("--random-seed", type=int, default=42, help="Seed for deterministic shuffling.")
     parser.add_argument("--max-length", type=int, default=512, help="Maximum sequence length for tokenization.")
@@ -341,19 +346,10 @@ def build_label_lookup(
         for record in records:
             url_a = record.get("url_a")
             url_b = record.get("url_b")
-            margin = record.get("margin")
             if url_a is not None:
                 graph.setdefault(url_a, set())
             if url_b is not None:
                 graph.setdefault(url_b, set())
-            if (
-                url_a is not None
-                and url_b is not None
-                and margin is not None
-                and float(margin) >= threshold
-            ):
-                graph[url_a].add(url_b)
-                graph[url_b].add(url_a)
 
     if not graph:
         return {}
