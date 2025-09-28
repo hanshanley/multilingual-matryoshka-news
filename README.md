@@ -54,7 +54,11 @@ utils.py                       # Helper functions shared across the project
 
    For a non-Matryoshka baseline, switch to `modified-angie.py`.
 
-3. **Generate embeddings for raw text**
+   
+Request mE5 Model Weights
+In this work, we find that a finetuned version of the mE5-base model achieved the best downstream results. To request the weights of the model used in this work, please fill out the following [Google form](https://forms.gle/ASzCcywsQ4Pd9Eyh6)
+
+4. **Generate embeddings for raw text**
 
    ```bash
    python embedding_training_and_inference/inference.py \
@@ -62,7 +66,7 @@ utils.py                       # Helper functions shared across the project
      --output-path outputs/text_embeddings.json
    ```
 
-4. **Cluster embeddings hierarchically**
+5. **Cluster embeddings hierarchically**
 
    ```bash
    python clustering/level-wise-rac.py \
