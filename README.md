@@ -112,7 +112,7 @@ data formats, and detailed explanations of the batching/sampling strategies.
 
 ## License and Copyright
 
-Copyright 2024 The Board of Trustees of The Leland Stanford Junior University
+Copyright 2025 The Board of Trustees of The Leland Stanford Junior University
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
