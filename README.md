@@ -55,7 +55,7 @@ utils.py                       # Helper functions shared across the project
    For a non-Matryoshka baseline, switch to `modified-angie.py`.
 
    
-Request mE5 Model Weights
+***Request mE5 Model Weights***
 In this work, we find that a finetuned version of the mE5-base model achieved the best downstream results. To request the weights of the model used in this work, please fill out the following [Google form](https://forms.gle/ASzCcywsQ4Pd9Eyh6)
 
 4. **Generate embeddings for raw text**
