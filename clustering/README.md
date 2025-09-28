@@ -45,7 +45,7 @@ The output JSON contains:
 
 - `assignments`: A list of records, each describing the source ID, the embedding index, and the cluster label per level.
 - `summary_by_id`: Counts of how many embeddings for each ID fall into each cluster at every level.
-- `metadata`: Thresholds, projections, number of embeddings, and number of levels.
+- `metadata`: Thresholds, dimensions, number of embeddings, and number of levels.
 
 ## Notes
 

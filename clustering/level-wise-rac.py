@@ -202,7 +202,7 @@ def export_assignments(
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# Command Line 
 # ---------------------------------------------------------------------------
 
 def parse_float_sequence(raw: str, argument: str) -> List[float]:
