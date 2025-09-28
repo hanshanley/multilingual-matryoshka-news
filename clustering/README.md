@@ -17,12 +17,12 @@ You can install the Python dependencies listed in the project-wide `requirements
 
 ```python
 {
-    "story-001": [np.ndarray(shape=(768,)), np.ndarray(shape=(768,))],
-    "story-002": [np.ndarray(shape=(768,))]
+    "article_1": [np.ndarray(shape=(768,)), np.ndarray(shape=(768,))],
+    "article_2": [np.ndarray(shape=(768,))]
 }
 ```
 
-Vectors are L2-normalised before clustering. The script also accepts an optional JSON file with pairwise similarity labels when building batches elsewhere in the repo; it is **not** required here.
+Vectors are L2-normalised before clustering.
 
 ## Usage
 
