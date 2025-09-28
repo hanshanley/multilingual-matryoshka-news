@@ -1,10 +1,8 @@
-"""AngIE embedding training script.
+"""Train AngIE-style multilingual embeddings from paired news data.
 
-This refactored version mirrors the structure used in ``matryoshka-angie.py``:
-configuration is supplied via the command line, data loading happens through
-utility functions, and the training loop supports checkpointing and optional
-validation. All absolute paths were replaced with user-provided arguments so
-that the script can be published without sensitive defaults.
+Invoke ``python modified-angie.py --train-path <train.jsonl> --output-dir <ckpt_dir>``
+to fine-tune a backbone encoder with AngIE losses; optional validation and
+label-aware batching are controlled via CLI flags.
 """
 
 from __future__ import annotations
@@ -168,6 +166,7 @@ class NonRepeatingBatchSampler(Sampler[List[int]]):
 
 
 def parse_args() -> TrainingConfig:
+    """Parse CLI arguments and convert them into a ``TrainingConfig`` instance."""
     parser = argparse.ArgumentParser(description="Train AngIE multilingual embeddings.")
     parser.add_argument("--train-path", type=Path, required=True, help="Path to the training JSONL file.")
     parser.add_argument("--val-path", type=Path, default=None, help="Optional path to a separate validation JSONL file.")
@@ -210,10 +209,12 @@ def parse_args() -> TrainingConfig:
 
 
 def setup_logging() -> None:
+    """Initialise a lightweight console logger."""
     logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 
 
 def set_random_seed(seed: int) -> None:
+    """Seed Python, PyTorch, and CUDA RNGs for reproducible runs."""
     random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -221,6 +222,7 @@ def set_random_seed(seed: int) -> None:
 
 
 def read_pairs(path: Path) -> List[Tuple[str, str, str, str, float]]:
+    """Read the raw JSONL corpus and return tuples of URLs, texts, and margins."""
     entries: List[Tuple[str, str, str, str, float]] = []
     with path.open("r", encoding="utf-8") as handle:
         for line_num, raw_line in enumerate(handle, start=1):
@@ -247,6 +249,7 @@ def read_pairs(path: Path) -> List[Tuple[str, str, str, str, float]]:
 
 
 def assign_url_labels(entries: Sequence[Tuple[str, str, str, str, float]]) -> dict:
+    """Cluster articles by URL connectivity so labels align with story groups."""
     graph: defaultdict[str, set[str]] = defaultdict(set)
     all_urls: set[str] = set()
 
@@ -278,6 +281,7 @@ def assign_url_labels(entries: Sequence[Tuple[str, str, str, str, float]]) -> di
 
 
 def prepare_dataset(entries: Sequence[Tuple[str, str, str, str, float]]) -> Tuple[List[List], List[List[int]]]:
+    """Project raw entries into (text_a, text_b, margin) triples plus URL label ids."""
     url_to_label = assign_url_labels(entries)
     dataset: List[List] = []
     label_pairs: List[List[int]] = []
@@ -290,6 +294,7 @@ def prepare_dataset(entries: Sequence[Tuple[str, str, str, str, float]]) -> Tupl
 
 
 def load_dataset_with_labels(path: Path) -> Tuple[List[List], List[List[int]]]:
+    """Convenience wrapper that reads a JSONL file and generates label pairs."""
     entries = read_pairs(path)
     return prepare_dataset(entries)
 
@@ -301,6 +306,7 @@ def split_train_val(
     val_ratio: float,
     seed: int,
 ) -> Tuple[List[List], List[List[int]], List[List], List[List[int]]]:
+    """Randomly split the dataset when an explicit validation file is absent."""
     if not dataset:
         return dataset, labels, [], []
 
@@ -325,6 +331,7 @@ def split_train_val(
 
 
 def get_device() -> torch.device:
+    """Select CUDA when available, otherwise default to CPU."""
     if torch.cuda.is_available():
         device = torch.device("cuda")
         logging.info("Using CUDA device: %s", torch.cuda.get_device_name(0))
@@ -336,12 +343,14 @@ def get_device() -> torch.device:
 
 
 def mean_pooling(model_output, attention_mask: torch.Tensor) -> torch.Tensor:
+    """Compute mean pooling with an attention mask to obtain sentence embeddings."""
     token_embeddings = model_output[0]
     mask = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
     return torch.sum(token_embeddings * mask, dim=1) / torch.clamp(mask.sum(dim=1), min=1e-9)
 
 
 def encode_with_dropout(model: AutoModel, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Generate two forward passes that reflect dropout variability for contrastive losses."""
     embeddings = mean_pooling(model(input_ids=input_ids, attention_mask=attention_mask), attention_mask)
     embeddings_diff = mean_pooling(model(input_ids=input_ids, attention_mask=attention_mask), attention_mask)
     return embeddings, embeddings_diff
@@ -356,6 +365,7 @@ def contrastive_alignment_loss(
     device: torch.device,
     temperature: float = 0.05,
 ) -> torch.Tensor:
+    """InfoNCE-style contrastive term linking paired dropout views."""
     data_full = torch.cat((embeddings_1, embeddings_2), dim=0)
     data_full_diff = torch.cat((embeddings_1_diff, embeddings_2_diff), dim=0)
     similarity = torch.mm(data_full, data_full_diff.t()) / temperature
@@ -376,6 +386,7 @@ def contrastive_alignment_loss(
 
 
 def cosine_loss(y_true: torch.Tensor, y_pred: torch.Tensor, tau: float = 20.0) -> torch.Tensor:
+    """Ranking-friendly cosine loss adapted from the CoSENT formulation."""
     order_matrix = (y_true[:, None] < y_true[None, :]).float()
     normalized = F.normalize(y_pred, p=2, dim=1)
     similarities = torch.sum(normalized[::2] * normalized[1::2], dim=1) * tau
@@ -392,6 +403,7 @@ def angle_loss(
     tau: float = 1.0,
     pooling_strategy: str = "sum",
 ) -> torch.Tensor:
+    """Phase-aware loss borrowed from AnglE that complements cosine ranking."""
     order_matrix = (y_true[:, None] < y_true[None, :]).float()
 
     real_part, imag_part = torch.chunk(y_pred, 2, dim=1)
@@ -425,6 +437,7 @@ def angle_loss(
 
 
 def interleave_rows(tensor_a: torch.Tensor, tensor_b: torch.Tensor) -> torch.Tensor:
+    """Interleave rows of two tensors so paired embeddings appear consecutively."""
     return torch.stack((tensor_a, tensor_b), dim=1).reshape(-1, tensor_a.size(1))
 
 
@@ -437,6 +450,7 @@ def calculate_cosine_angle_loss(
     *,
     device: torch.device,
 ) -> torch.Tensor:
+    """Aggregate cosine, angle, and contrastive terms for a single AngIE batch."""
     combined = torch.cat(
         (
             interleave_rows(embeddings_1, embeddings_1_diff),
@@ -457,6 +471,7 @@ def calculate_cosine_angle_loss(
 
 
 def forward_batch(model: AutoModel, batch: dict, device: torch.device, config: TrainingConfig) -> torch.Tensor:
+    """Run a training step over one mini-batch and aggregate AngIE losses."""
     input_a = batch["text_pair1_token_ids"].to(device)
     mask_a = batch["text_pair1_attention_mask"].to(device)
     input_b = batch["text_pair2_token_ids"].to(device)
@@ -487,6 +502,7 @@ def forward_batch(model: AutoModel, batch: dict, device: torch.device, config: T
 
 
 def evaluate(model: AutoModel, dataloader: DataLoader, device: torch.device, config: TrainingConfig) -> float:
+    """Compute the average training loss across a validation dataloader."""
     model.eval()
     losses: List[float] = []
     with torch.no_grad():
@@ -503,6 +519,7 @@ def save_checkpoint(
     global_step: int,
     output_dir: Path,
 ) -> None:
+    """Persist model and optimiser state so training can be resumed."""
     output_dir.mkdir(parents=True, exist_ok=True)
     model_path = output_dir / f"model-epoch{epoch}-step{global_step}.pt"
     optimizer_path = output_dir / f"optimizer-epoch{epoch}-step{global_step}.pt"
@@ -515,6 +532,7 @@ def build_dataloaders(
     config: TrainingConfig,
     tokenizer: AutoTokenizer,
 ) -> Tuple[DataLoader, Optional[DataLoader]]:
+    """Create train/validation dataloaders with optional label-aware batching."""
     train_dataset_raw, train_labels = load_dataset_with_labels(config.train_path)
 
     if config.val_path:
@@ -561,6 +579,7 @@ def build_dataloaders(
 
 
 def train(config: TrainingConfig) -> None:
+    """Full training entry point orchestrating loading, optimisation, and validation."""
     setup_logging()
     logging.info("Configuration: %s", config)
     set_random_seed(config.random_seed)

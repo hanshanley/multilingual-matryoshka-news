@@ -1,7 +1,7 @@
-"""Matryoshka embedding training script.
+"""Train Matryoshka-style multilingual embeddings with configurable CLI options.
 
-This refactored version exposes configuration via CLI arguments, avoids
-hard-coded file paths, and clarifies the training loop for publication.
+Run ``python matryoshka-angie.py --train-path <train.jsonl> --val-path <val.jsonl> --output-dir <ckpt_dir>``
+to fine-tune a backbone encoder using multi-resolution Matryoshka losses.
 """
 
 from __future__ import annotations
@@ -93,6 +93,7 @@ class EmbeddingDataset(Dataset):
 
 
 def parse_args() -> TrainingConfig:
+    """Parse CLI arguments and convert them into a ``TrainingConfig`` instance."""
     parser = argparse.ArgumentParser(description="Train Matryoshka multilingual embeddings.")
     parser.add_argument("--train-path", type=Path, required=True, help="Path to the training JSONL file.")
     parser.add_argument("--val-path", type=Path, required=True, help="Path to the validation JSONL file.")
@@ -128,10 +129,12 @@ def parse_args() -> TrainingConfig:
 
 
 def setup_logging() -> None:
+    """Initialise a lightweight console logger."""
     logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 
 
 def load_jsonl(path: Path) -> List[Sequence]:
+    """Load a JSONL file containing training pairs and return raw records."""
     if not path.exists():
         raise FileNotFoundError(f"Dataset not found: {path}")
 
@@ -153,6 +156,7 @@ def load_jsonl(path: Path) -> List[Sequence]:
 
 
 def get_device() -> torch.device:
+    """Select CUDA when available, otherwise default to CPU."""
     if torch.cuda.is_available():
         device = torch.device("cuda")
         logging.info("Using CUDA device: %s", torch.cuda.get_device_name(0))
@@ -165,22 +169,26 @@ def get_device() -> torch.device:
 
 
 def mean_pooling(model_output, attention_mask: torch.Tensor) -> torch.Tensor:
+    """Compute mean pooling with an attention mask to obtain sentence embeddings."""
     token_embeddings = model_output[0]
     mask = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
     return torch.sum(token_embeddings * mask, dim=1) / torch.clamp(mask.sum(dim=1), min=1e-9)
 
 
 def encode_with_dropout(model: AutoModel, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Generate two forward passes that reflect dropout variability for contrastive losses."""
     embedding = mean_pooling(model(input_ids=input_ids, attention_mask=attention_mask), attention_mask)
     embedding_diff = mean_pooling(model(input_ids=input_ids, attention_mask=attention_mask), attention_mask)
     return embedding, embedding_diff
 
 
 def binarize_margins(margins: torch.Tensor, threshold: float) -> torch.Tensor:
+    """Convert continuous margins into binary labels based on a threshold."""
     return torch.where(margins >= threshold, torch.ones_like(margins), torch.zeros_like(margins))
 
 
 def interleave_rows(tensor_a: torch.Tensor, tensor_b: torch.Tensor) -> torch.Tensor:
+    """Interleave rows of two tensors so paired embeddings appear consecutively."""
     return torch.stack((tensor_a, tensor_b), dim=1).reshape(-1, tensor_a.size(1))
 
 
@@ -193,6 +201,7 @@ def contrastive_loss(
     device: torch.device,
     temperature: float = 0.05,
 ) -> torch.Tensor:
+    """InfoNCE-style contrastive term linking paired dropout views."""
     data_full = torch.cat((embeddings_1, embeddings_2_diff), dim=0)
     data_full_diff = torch.cat((embeddings_1_diff, embeddings_2), dim=0)
     similarity = torch.mm(data_full, data_full_diff.t()) / temperature
@@ -213,6 +222,7 @@ def contrastive_loss(
 
 
 def cosine_loss(y_true: torch.Tensor, y_pred: torch.Tensor, tau: float = 20.0) -> torch.Tensor:
+    """Ranking-friendly cosine loss adapted from the CoSENT formulation."""
     order_matrix = (y_true[:, None] < y_true[None, :]).float()
     normalized = F.normalize(y_pred, p=2, dim=1)
     similarities = torch.sum(normalized[::2] * normalized[1::2], dim=1) * tau
@@ -229,6 +239,7 @@ def angle_loss(
     tau: float = 1.0,
     pooling_strategy: str = "sum",
 ) -> torch.Tensor:
+    """Phase-aware loss borrowed from AnglE that complements cosine ranking."""
     order_matrix = (y_true[:, None] < y_true[None, :]).float()
 
     real_part, imag_part = torch.chunk(y_pred, 2, dim=1)
@@ -270,6 +281,7 @@ def matryoshka_level_loss(
     binary_margins: torch.Tensor,
     device: torch.device,
 ) -> torch.Tensor:
+    """Aggregate Matryoshka losses for one resolution slice."""
     combined = torch.cat(
         (
             interleave_rows(emb1, emb1_diff),
@@ -302,6 +314,7 @@ def matryoshka_level_loss(
 
 
 def forward_batch(model: AutoModel, batch: dict, device: torch.device, config: TrainingConfig) -> torch.Tensor:
+    """Run a training step over one mini-batch and aggregate Matryoshka losses."""
     input_a = batch["text_pair1_token_ids"].to(device)
     mask_a = batch["text_pair1_attention_mask"].to(device)
     input_b = batch["text_pair2_token_ids"].to(device)
@@ -328,6 +341,7 @@ def forward_batch(model: AutoModel, batch: dict, device: torch.device, config: T
 
 
 def evaluate(model: AutoModel, dataloader: DataLoader, device: torch.device, config: TrainingConfig) -> float:
+    """Compute the average training loss across a validation dataloader."""
     model.eval()
     losses: List[float] = []
     with torch.no_grad():
@@ -344,6 +358,7 @@ def save_checkpoint(
     global_step: int,
     output_dir: Path,
 ) -> None:
+    """Persist model and optimiser state so training can be resumed."""
     output_dir.mkdir(parents=True, exist_ok=True)
     model_path = output_dir / f"model-epoch{epoch}-step{global_step}.pt"
     optimizer_path = output_dir / f"optimizer-epoch{epoch}-step{global_step}.pt"
@@ -353,6 +368,7 @@ def save_checkpoint(
 
 
 def train(config: TrainingConfig) -> None:
+    """Full training entry point orchestrating loading, optimisation, and validation."""
     setup_logging()
     logging.info("Configuration: %s", config)
 
