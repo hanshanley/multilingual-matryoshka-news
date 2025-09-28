@@ -36,13 +36,14 @@ for id_ in complete_ids_to_embeddings:
 
 # Convert embeddings list to a NumPy array and normalize
 embeddings = np.array(embeddings).reshape(len(embeddings), dim)
+top_embeddings = np.array(embeddings)[,:192].reshape(len(embeddings), 192)
 faiss.normalize_L2(embeddings)
 
 # Set the thresholds for the three clustering layers
 THRESHOLDS = [0.5, 0.5, 0.5]
 
 # Perform the first round of clustering using RAC++
-labels = racplusplus.rac(embeddings, 1 - THRESHOLDS[0], None, 1000, 8, "cosine")
+labels = racplusplus.rac(top_embeddings, 1 - THRESHOLDS[0], None, 1000, 8, "cosine")
 
 # Initialize structures to map clusters to labels
 new_clusters = []
@@ -94,7 +95,7 @@ for ind in original_ind_to_second_cluster:
 # Compute the average embedding for each cluster (second layer)
 second_labels = []
 for cluster in second_clusters_to_labels:
-    new_clusters.append(np.array(np.average(embeddings[second_clusters_to_labels[cluster]], axis=0)[:192]))
+    new_clusters.append(np.array(np.average(embeddings[second_clusters_to_labels[cluster]], axis=0)[:768]))
     second_labels.append(cluster)
 
 # Perform the third round of clustering on the centroids of the second layer clusters
