@@ -2,6 +2,11 @@
 
 This document outlines how to obtain the external corpora used alongside this project. Each source has its own license and access requirements—review the linked documentation before downloading or redistributing the data. We provide access to the synthetic versions of the SemEval 2022 Task 8 dataset that we created in our paper as well as the similarity labels for all articles [here](https://github.com/hanshanley/multilingual-matryoshka-news/blob/main/data/labels_semeval_2022_task_eight.json). 
 
+## SemEval 2022 Task 8 – Synthetic Dataset
+- **Overview:** We provide synthetic translations as well as synthetically created alterations of the original SemEval 2022 Task 8 dataset. Due to the size of this dataset, they must be downloaded from Zenodo. You may find the link here:
+
+- **Labels:** Labels for the SemEval 2022 Task 8 dataset can be downloaed here. These labels are taken from the original SemEval 2022 Task 8 dataset. Each URL pair is given a granular similar score from Very Similar to Very Dissimilar. 
+
 ## SemEval 2022 Task 8 – Multilingual News Article Similarity
 - **Overview:** Article pairs labelled for graded similarity across English, Spanish, Russian, Turkish, and Farsi news outlets. Details are in the shared task description (Lai et al., 2022) – https://aclanthology.org/2022.semeval-1.155.pdf.
 - **Access:** The organisers only distribute metadata (URLs, similarity scores, splits) via the CodaLab competition page: http://www.euagendas.org/semeval2022. You must create a CodaLab account, join the competition, and accept the licence to download the official `.tsv` files (train/dev/test links and labels).
