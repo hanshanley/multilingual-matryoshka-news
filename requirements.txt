@@ -2,6 +2,11 @@
 torch>=2.0
 transformers>=4.35
 tqdm>=4.64
+numpy>=1.23
 
 # Optional utilities
 pypdf>=3.0
+# Clustering dependencies (install one of the FAISS variants and RAC++ manually if needed)
+faiss-cpu>=1.7.4 ; platform_system != "Windows"
+# racplusplus is distributed as a Git repository:
+# racplusplus @ git+https://github.com/porterehunley/RACplusplus
