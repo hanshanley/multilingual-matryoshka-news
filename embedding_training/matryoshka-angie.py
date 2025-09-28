@@ -25,6 +25,44 @@ BATCH_SIZE = 16
 EMBEDDING_SIZE = 768
 
 
+BATCH_SIZE = 16
+EMBEDDING_SIZE= 768
+
+
+
+train_dataset = []
+train_lines_to_remove = []
+f = open('/mnt/projects/qanon_proj/Matryoshka/all_processed_datasets_w_entities_replaced-20241125.jsonl','r')
+ind = 0 
+for line in f:
+    try:
+        train_dataset.append(json.loads(line))
+
+    except Exception as e:
+        print(e)
+    if ind %100000 ==0:
+        print(ind)
+    ind+=1
+f.close()
+
+val_dataset = []
+f = open('/mnt/projects/qanon_proj/Matryoshka/validation_multilingual_final-20241008.jsonl','r')
+ind = 0 
+val_lines_to_remove = []
+
+for line in f:
+    try:
+        val_dataset.append(json.loads(line))
+        
+    except Exception as e:
+        print(e)
+    if ind %100000 ==0:
+        print(ind)
+    ind+=1
+    
+f.close()
+
+
 
 class EmbeddingDataset(Dataset):
     def __init__(self, dataset, args):
@@ -69,7 +107,13 @@ class EmbeddingDataset(Dataset):
 
         return batched_data
 
-
+import random
+from transformers import AutoModel, AutoTokenizer
+class Object(object):
+    pass
+args = Object()
+model_name ='intfloat/multilingual-e5-base'
+args.tokenizer ='intfloat/multilingual-e5-base'
 
 
 
