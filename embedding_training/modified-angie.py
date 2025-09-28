@@ -15,7 +15,7 @@ import random
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -45,6 +45,8 @@ class TrainingConfig:
     positive_margin_threshold: float = 0.75
     num_workers: int = 0
     use_label_sampler: bool = True
+    labels_path: Optional[Path] = None
+    similarity_threshold: float = 0.25
 
     def resolved_tokenizer(self) -> str:
         return self.tokenizer_name or self.model_name
@@ -53,7 +55,7 @@ class TrainingConfig:
 class EmbeddingDataset(Dataset):
     """Pairs of texts with similarity margins for AngIE training."""
 
-    def __init__(self, pairs: Sequence[Sequence], tokenizer: AutoTokenizer, max_length: int = 512):
+    def __init__(self, pairs: Sequence[Mapping[str, object]], tokenizer: AutoTokenizer, max_length: int = 512):
         self.pairs = list(pairs)
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -61,10 +63,10 @@ class EmbeddingDataset(Dataset):
     def __len__(self) -> int:  # pragma: no cover - trivial
         return len(self.pairs)
 
-    def __getitem__(self, idx: int) -> Sequence:
+    def __getitem__(self, idx: int) -> Mapping[str, object]:
         return self.pairs[idx]
 
-    def _encode(self, texts: Iterable[str]) -> dict:
+    def _encode(self, texts: Iterable[str]) -> Dict[str, torch.Tensor]:
         return self.tokenizer(
             list(texts),
             return_tensors="pt",
@@ -73,10 +75,10 @@ class EmbeddingDataset(Dataset):
             truncation=True,
         )
 
-    def collate_fn(self, batch: Sequence[Sequence]) -> dict:
-        text_a = [f"query: {pair[0]}" for pair in batch]
-        text_b = [f"query: {pair[1]}" for pair in batch]
-        margins = [float(pair[2]) for pair in batch]
+    def collate_fn(self, batch: Sequence[Mapping[str, object]]) -> Dict[str, torch.Tensor]:
+        text_a = [f"query: {pair['text_a']}" for pair in batch]
+        text_b = [f"query: {pair['text_b']}" for pair in batch]
+        margins = [float(pair['margin']) for pair in batch]
 
         encoded_a = self._encode(text_a)
         encoded_b = self._encode(text_b)
@@ -185,6 +187,8 @@ def parse_args() -> TrainingConfig:
     parser.add_argument("--positive-margin-threshold", type=float, default=0.75, help="Margins above this threshold are treated as positive (set to 1.0).")
     parser.add_argument("--num-workers", type=int, default=0, help="Number of DataLoader workers.")
     parser.add_argument("--disable-label-sampler", action="store_true", help="Use simple shuffled batching instead of the custom label-balanced sampler.")
+    parser.add_argument("--labels-path", type=Path, default=None, help="Optional JSON file containing URL similarity labels.")
+    parser.add_argument("--similarity-threshold", type=float, default=0.25, help="Edge weight >= threshold counts as similar.")
 
     args = parser.parse_args()
     return TrainingConfig(
@@ -205,6 +209,8 @@ def parse_args() -> TrainingConfig:
         positive_margin_threshold=args.positive_margin_threshold,
         num_workers=args.num_workers,
         use_label_sampler=not args.disable_label_sampler,
+        labels_path=args.labels_path,
+        similarity_threshold=args.similarity_threshold,
     )
 
 
@@ -221,113 +227,187 @@ def set_random_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def read_pairs(path: Path) -> List[Tuple[str, str, str, str, float]]:
-    """Read the raw JSONL corpus and return tuples of URLs, texts, and margins."""
-    entries: List[Tuple[str, str, str, str, float]] = []
+def normalize_pair_record(record: object) -> Dict[str, object]:
+    """Normalise heterogeneous pair records into a standard dictionary structure."""
+    if isinstance(record, MutableMapping):
+        url_a = record.get("url_a") or record.get("url1")
+        text_a = record.get("text_a") or record.get("text1") or record.get("data1")
+        url_b = record.get("url_b") or record.get("url2")
+        text_b = record.get("text_b") or record.get("text2") or record.get("data2")
+        margin = record.get("margin") or record.get("similarity") or record.get("score")
+    elif isinstance(record, (list, tuple)):
+        if len(record) >= 5:
+            url_a, text_a, url_b, text_b, margin = record[:5]
+        elif len(record) == 3:
+            url_a = url_b = None
+            text_a, text_b, margin = record
+        else:
+            raise ValueError(f"Expected 3 or 5 elements, got {len(record)}")
+    else:
+        raise TypeError(f"Unsupported record type: {type(record)}")
+
+    if text_a is None or text_b is None:
+        raise ValueError("Both text_a and text_b must be present in each record.")
+    if margin is None:
+        raise ValueError("Each record must include a similarity score or margin.")
+
+    return {
+        "url_a": url_a,
+        "text_a": text_a,
+        "url_b": url_b,
+        "text_b": text_b,
+        "margin": float(margin),
+    }
+
+
+def load_similarity_labels(path: Path) -> Dict[str, Dict[str, float]]:
+    """Load a nested similarity map from JSON for downstream clustering."""
+    if not path or not path.exists():
+        raise FileNotFoundError(f"Similarity label file not found: {path}")
     with path.open("r", encoding="utf-8") as handle:
-        for line_num, raw_line in enumerate(handle, start=1):
-            raw_line = raw_line.strip()
-            if not raw_line:
+        data = json.load(handle)
+    if not isinstance(data, MutableMapping):
+        raise ValueError("Similarity labels must be a JSON object mapping URLs to score dictionaries.")
+
+    normalised: Dict[str, Dict[str, float]] = {}
+    for url, neighbours in data.items():
+        if not isinstance(neighbours, MutableMapping):
+            raise ValueError(f"Expected nested mappings for URL {url}, got {type(neighbours)}")
+        normalised[url] = {str(other): float(score) for other, score in neighbours.items()}
+    return normalised
+
+
+def _connected_components(graph: Mapping[str, Set[str]]) -> List[Set[str]]:
+    """Compute connected components for an undirected similarity graph."""
+    components: List[Set[str]] = []
+    visited: Set[str] = set()
+
+    for node in sorted(graph.keys()):
+        if node in visited:
+            continue
+        stack = [node]
+        component: Set[str] = set()
+        while stack:
+            current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            component.add(current)
+            stack.extend(sorted(graph[current] - visited))
+        components.append(component)
+
+    return components
+
+
+def derive_similarity_components(
+    similarity_map: Mapping[str, Mapping[str, float]],
+    threshold: float = 0.25,
+) -> List[Set[str]]:
+    """Compute connected components where edges meet the similarity threshold."""
+    graph: MutableMapping[str, Set[str]] = defaultdict(set)
+    for url, neighbours in similarity_map.items():
+        graph.setdefault(url, set())
+        for neighbour, score in neighbours.items():
+            graph.setdefault(neighbour, set())
+            if float(score) >= threshold:
+                graph[url].add(neighbour)
+                graph[neighbour].add(url)
+    return _connected_components(graph)
+
+
+def build_label_lookup(
+    similarity_map: Optional[Mapping[str, Mapping[str, float]]] = None,
+    records: Optional[Sequence[Mapping[str, object]]] = None,
+    *,
+    threshold: float = 0.25,
+) -> Dict[str, int]:
+    """Assign consecutive cluster identifiers to URLs using explicit labels and record margins."""
+    graph: MutableMapping[str, Set[str]] = defaultdict(set)
+
+    if similarity_map:
+        for url, neighbours in similarity_map.items():
+            graph.setdefault(url, set())
+            for neighbour, score in neighbours.items():
+                graph.setdefault(neighbour, set())
+                if float(score) >= threshold:
+                    graph[url].add(neighbour)
+                    graph[neighbour].add(url)
+
+    if records:
+        for record in records:
+            url_a = record.get("url_a")
+            url_b = record.get("url_b")
+            margin = record.get("margin")
+            if url_a is not None:
+                graph.setdefault(url_a, set())
+            if url_b is not None:
+                graph.setdefault(url_b, set())
+            if (
+                url_a is not None
+                and url_b is not None
+                and margin is not None
+                and float(margin) >= threshold
+            ):
+                graph[url_a].add(url_b)
+                graph[url_b].add(url_a)
+
+    if not graph:
+        return {}
+
+    components = _connected_components(graph)
+    label_lookup: Dict[str, int] = {}
+    for idx, component in enumerate(components):
+        for url in component:
+            label_lookup[url] = idx
+    return label_lookup
+
+
+def load_jsonl(path: Path) -> List[Mapping[str, object]]:
+    """Load a JSONL file containing training pairs and normalise each record."""
+    if not path or not path.exists():
+        raise FileNotFoundError(f"Dataset not found: {path}")
+
+    records: List[Mapping[str, object]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_num, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
                 continue
             try:
-                record = json.loads(raw_line)
+                record = json.loads(line)
             except json.JSONDecodeError as exc:
                 logging.warning("Skipping line %s in %s due to JSON error: %s", line_num, path, exc)
                 continue
-
             try:
-                url_a, text_a, url_b, text_b = record[0], record[1], record[2], record[3]
-                margin = float(record[-1])
-            except (IndexError, TypeError, ValueError) as exc:
-                logging.warning("Skipping malformed record at line %s in %s: %s", line_num, path, exc)
+                normalised = normalize_pair_record(record)
+            except (TypeError, ValueError) as exc:
+                logging.warning("Skipping line %s in %s due to format error: %s", line_num, path, exc)
                 continue
+            records.append(normalised)
 
-            entries.append((url_a, text_a, url_b, text_b, margin))
-
-    logging.info("Loaded %s pairs from %s", len(entries), path)
-    return entries
-
-
-def assign_url_labels(entries: Sequence[Tuple[str, str, str, str, float]]) -> dict:
-    """Cluster articles by URL connectivity so labels align with story groups."""
-    graph: defaultdict[str, set[str]] = defaultdict(set)
-    all_urls: set[str] = set()
-
-    for url_a, _text_a, url_b, _text_b, margin in entries:
-        all_urls.update({url_a, url_b})
-        if margin > 0:
-            graph[url_a].add(url_b)
-            graph[url_b].add(url_a)
-
-    for url in all_urls:
-        graph.setdefault(url, set())
-
-    labels: dict[str, int] = {}
-    label_id = 0
-
-    for url in sorted(all_urls):
-        if url in labels:
-            continue
-        stack = [url]
-        while stack:
-            current = stack.pop()
-            if current in labels:
-                continue
-            labels[current] = label_id
-            stack.extend(sorted(neighbour for neighbour in graph[current] if neighbour not in labels))
-        label_id += 1
-
-    return labels
-
-
-def prepare_dataset(entries: Sequence[Tuple[str, str, str, str, float]]) -> Tuple[List[List], List[List[int]]]:
-    """Project raw entries into (text_a, text_b, margin) triples plus URL label ids."""
-    url_to_label = assign_url_labels(entries)
-    dataset: List[List] = []
-    label_pairs: List[List[int]] = []
-
-    for url_a, text_a, url_b, text_b, margin in entries:
-        dataset.append([text_a, text_b, float(margin)])
-        label_pairs.append([url_to_label[url_a], url_to_label[url_b]])
-
-    return dataset, label_pairs
-
-
-def load_dataset_with_labels(path: Path) -> Tuple[List[List], List[List[int]]]:
-    """Convenience wrapper that reads a JSONL file and generates label pairs."""
-    entries = read_pairs(path)
-    return prepare_dataset(entries)
+    logging.info("Loaded %s records from %s", len(records), path)
+    return records
 
 
 def split_train_val(
-    dataset: List[List],
-    labels: List[List[int]],
+    dataset: List[Mapping[str, object]],
     *,
     val_ratio: float,
     seed: int,
-) -> Tuple[List[List], List[List[int]], List[List], List[List[int]]]:
+) -> Tuple[List[Mapping[str, object]], List[Mapping[str, object]]]:
     """Randomly split the dataset when an explicit validation file is absent."""
-    if not dataset:
-        return dataset, labels, [], []
-
-    if val_ratio <= 0:
-        return dataset, labels, [], []
+    if not dataset or val_ratio <= 0:
+        return dataset, []
 
     if val_ratio >= 1:
         raise ValueError("val_ratio must be in the range (0, 1) when no explicit validation path is provided")
 
-    combined = list(zip(dataset, labels))
+    records = list(dataset)
     rng = random.Random(seed)
-    rng.shuffle(combined)
+    rng.shuffle(records)
 
-    split_index = max(1, int(len(combined) * (1 - val_ratio)))
-    train_combined = combined[:split_index]
-    val_combined = combined[split_index:]
-
-    train_dataset, train_labels = zip(*train_combined) if train_combined else ([], [])
-    val_dataset, val_labels = zip(*val_combined) if val_combined else ([], [])
-
-    return list(train_dataset), list(train_labels), list(val_dataset), list(val_labels)
+    split_index = max(1, int(len(records) * (1 - val_ratio)))
+    return records[:split_index], records[split_index:]
 
 
 def get_device() -> torch.device:
@@ -533,29 +613,47 @@ def build_dataloaders(
     tokenizer: AutoTokenizer,
 ) -> Tuple[DataLoader, Optional[DataLoader]]:
     """Create train/validation dataloaders with optional label-aware batching."""
-    train_dataset_raw, train_labels = load_dataset_with_labels(config.train_path)
-
+    train_records = load_jsonl(config.train_path)
     if config.val_path:
-        val_dataset_raw, _ = load_dataset_with_labels(config.val_path)
+        val_records = load_jsonl(config.val_path)
     else:
-        train_dataset_raw, train_labels, val_dataset_raw, _ = split_train_val(
-            train_dataset_raw,
-            train_labels,
+        train_records, val_records = split_train_val(
+            train_records,
             val_ratio=config.val_ratio,
             seed=config.random_seed,
         )
 
-    train_dataset = EmbeddingDataset(train_dataset_raw, tokenizer, max_length=config.max_length)
+    similarity_map = load_similarity_labels(config.labels_path) if config.labels_path else None
+    combined_records = train_records + val_records
+    label_lookup = build_label_lookup(similarity_map, records=combined_records, threshold=config.similarity_threshold)
 
-    if config.use_label_sampler and train_labels:
-        sampler = NonRepeatingBatchSampler(train_labels, config.batch_size, seed=config.random_seed)
-        train_loader = DataLoader(
-            train_dataset,
-            batch_sampler=sampler,
-            collate_fn=train_dataset.collate_fn,
-            num_workers=config.num_workers,
-        )
-    else:
+    train_dataset = EmbeddingDataset(train_records, tokenizer, max_length=config.max_length)
+
+    can_use_sampler = (
+        config.use_label_sampler
+        and train_records
+        and all(record.get("url_a") and record.get("url_b") for record in train_records)
+        and label_lookup
+    )
+
+    if can_use_sampler:
+        try:
+            train_labels = [
+                (label_lookup[record["url_a"]], label_lookup[record["url_b"]])
+                for record in train_records
+            ]
+        except KeyError:
+            can_use_sampler = False
+        else:
+            sampler = NonRepeatingBatchSampler(train_labels, config.batch_size, seed=config.random_seed)
+            train_loader = DataLoader(
+                train_dataset,
+                batch_sampler=sampler,
+                collate_fn=train_dataset.collate_fn,
+                num_workers=config.num_workers,
+            )
+
+    if not can_use_sampler:
         train_loader = DataLoader(
             train_dataset,
             batch_size=config.batch_size,
@@ -565,8 +663,8 @@ def build_dataloaders(
         )
 
     val_loader: Optional[DataLoader] = None
-    if val_dataset_raw:
-        val_dataset = EmbeddingDataset(val_dataset_raw, tokenizer, max_length=config.max_length)
+    if val_records:
+        val_dataset = EmbeddingDataset(val_records, tokenizer, max_length=config.max_length)
         val_loader = DataLoader(
             val_dataset,
             batch_size=config.batch_size,
