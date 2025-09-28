@@ -1,617 +1,622 @@
-"""
-Purpose: This script processes a dataset of news article pairs to create embeddings using the AngIE loss.
-It includes data processing, dataset augmentation, custom sampling, and training of a multilingual embedding model using 
-cosine and angle loss functions. The script implements a training loop with validation and model checkpointing to identify 
-similar news articles across different levels of granularity.
+"""AngIE embedding training script.
 
-See the Results Section for additional details about training different baseline models using this method for comparison 
-against matryoshka trained embeddings. 
+This refactored version mirrors the structure used in ``matryoshka-angie.py``:
+configuration is supplied via the command line, data loading happens through
+utility functions, and the training loop supports checkpointing and optional
+validation. All absolute paths were replaced with user-provided arguments so
+that the script can be published without sensitive defaults.
 """
 
-# Import necessary libraries
-import pandas as pd
-import torch
-import numpy as np
+from __future__ import annotations
+
+import argparse
 import json
-import csv
-from torch.utils.data import Dataset, DataLoader, Sampler
-from transformers import AutoTokenizer, AutoModel, BertTokenizer, BertModel
-from torch import optim
-from datasets import load_dataset
-import re
+import logging
+import math
+import random
+from collections import defaultdict
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, List, Optional, Sequence, Tuple
+
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset, Sampler
 from tqdm import tqdm
-import random
-import gc
-from collections import defaultdict
+from transformers import AutoModel, AutoTokenizer
 
-# Set device to GPU if available
-torch.cuda.is_available()
-device = torch.cuda.current_device()
-torch.cuda.empty_cache()  # Clear GPU cache
-gc.collect()  # Garbage collection to free memory
 
-# Constants
-BATCH_SIZE = 16
-EMBEDDING_SIZE = 768
+@dataclass
+class TrainingConfig:
+    """Container for hyperparameters, paths, and runtime options."""
 
-# Step 1: Process the "NEWS PAIR DATASET" file to create a dictionary of URL pairs
-f = open('NEWS PAIR DATASET')
-url_to_also_appear = dict()
-for line in f:
-    try:
-        line = json.loads(line)
-        url1 = line[0]
-        url2 = line[2]
-        if line[-1] > 0:
-            if url1 not in url_to_also_appear:
-                url_to_also_appear[url1] = set()
-            url_to_also_appear[url1].add(url2)
-            url_to_also_appear[url1].add(url1)
-            if url2 not in url_to_also_appear:
-                url_to_also_appear[url2] = set()
-            url_to_also_appear[url2].add(url1)
-            url_to_also_appear[url2].add(url2)
-        else:
-            if url1 not in url_to_also_appear:
-                url_to_also_appear[url1] = set()
-            url_to_also_appear[url1].add(url1)
-            if url2 not in url_to_also_appear:
-                url_to_also_appear[url2] = set()
-            url_to_also_appear[url2].add(url2)
-    except Exception as e:
-        print(e)
+    train_path: Path
+    output_dir: Path
+    val_path: Optional[Path] = None
+    model_name: str = "intfloat/multilingual-e5-base"
+    tokenizer_name: Optional[str] = None
+    cache_dir: Optional[str] = None
+    batch_size: int = 16
+    embedding_size: int = 768
+    learning_rate: float = 2e-5
+    epochs: int = 5
+    validation_interval: int = 1_000
+    val_ratio: float = 0.1
+    random_seed: int = 42
+    max_length: int = 512
+    positive_margin_threshold: float = 0.75
+    num_workers: int = 0
+    use_label_sampler: bool = True
 
-# Expand URL pairs by including related URLs
-for url in url_to_also_appear:
-    for other_url in list(url_to_also_appear[url]):
-        url_to_also_appear[url].update(url_to_also_appear[other_url])
+    def resolved_tokenizer(self) -> str:
+        return self.tokenizer_name or self.model_name
 
-# Step 2: Create label dictionaries
-label_to_urls = dict()
-url_to_label = dict()
-current_label = -1
-f = open('NEWS PAIR DATASET')
-for line in f:
-    try:
-        line = json.loads(line)
-        url1 = line[0]
-        url2 = line[2]
-        if line[-1] > 0:
-            if url1 not in url_to_label and url2 not in url_to_label:
-                current_label += 1
-                url_to_label[url1] = current_label
-                for url in url_to_also_appear[url1]:
-                    url_to_label[url] = current_label
-                url_to_label[url2] = current_label
-                for url in url_to_also_appear[url2]:
-                    url_to_label[url] = current_label
-            elif url1 not in url_to_label and url2 in url_to_label:
-                url2label = url_to_label[url2]
-                url_to_label[url1] = url2label
-                for url in url_to_also_appear[url1]:
-                    url_to_label[url] = url2label
-            elif url1 in url_to_label and url2 not in url_to_label:
-                url1label = url_to_label[url1]
-                url_to_label[url2] = url1label
-                for url in url_to_also_appear[url2]:
-                    url_to_label[url] = url1label
-        else:
-            if url1 not in url_to_label and url2 not in url_to_label:
-                current_label += 1
-                url_to_label[url1] = current_label
-                for url in url_to_also_appear[url1]:
-                    url_to_label[url] = current_label
-                current_label += 1
-                url_to_label[url2] = current_label
-                for url in url_to_also_appear[url2]:
-                    url_to_label[url] = current_label
-            elif url1 not in url_to_label and url2 in url_to_label:
-                current_label += 1
-                url_to_label[url1] = current_label
-                for url in url_to_also_appear[url1]:
-                    url_to_label[url] = current_label
-            elif url1 in url_to_label and url2 not in url_to_label:
-                current_label += 1
-                url_to_label[url2] = current_label
-                for url in url_to_also_appear[url2]:
-                    url_to_label[url] = current_label
-    except Exception as e:
-        print(e)
 
-# Step 3: Create label-to-URL dictionary
-label_to_urls = dict()
-for url in url_to_label:
-    label = url_to_label[url]
-    if label not in label_to_urls:
-        label_to_urls[label] = set()
-    label_to_urls[label].add(url)
+class EmbeddingDataset(Dataset):
+    """Pairs of texts with similarity margins for AngIE training."""
 
-# Step 4: Load dataset lines and labels
-f = open('NEWS PAIR DATASET')
-lines = []
-num_bad = 0
-for line in f:
-    try:
-        line = json.loads(line)
-        lines.append([line[1], line[3], line[-1]])
-    except Exception as e:
-        print(e)
+    def __init__(self, pairs: Sequence[Sequence], tokenizer: AutoTokenizer, max_length: int = 512):
+        self.pairs = list(pairs)
+        self.tokenizer = tokenizer
+        self.max_length = max_length
 
-# Function to load embedding dataset
-def load_embedding_dataset(file_name):
-    dataset = []
-    labels = []
-    with open(file_name, 'r') as fp:
-        for line in fp:
-            try:
-                line = json.loads(line)
-                dataset.append([line[1], line[3], line[-1]])
-                labels.append([url_to_label[line[0]], url_to_label[line[2]]])
-            except Exception as e:
-                print(e)
-    return dataset, labels
+    def __len__(self) -> int:  # pragma: no cover - trivial
+        return len(self.pairs)
 
-# Load the dataset
-dataset, labels = load_embedding_dataset('NEWS PAIR DATASET')
+    def __getitem__(self, idx: int) -> Sequence:
+        return self.pairs[idx]
 
-# Shuffle and split the dataset into training and validation sets
-c = list(zip(dataset, labels))
-random.shuffle(c)
-dataset, labels = zip(*c)
+    def _encode(self, texts: Iterable[str]) -> dict:
+        return self.tokenizer(
+            list(texts),
+            return_tensors="pt",
+            max_length=self.max_length,
+            padding=True,
+            truncation=True,
+        )
 
-train_dataset = dataset[:int(0.90 * len(dataset))]
-val_dataset = dataset[int(0.90 * len(dataset)):]
-train_labels = labels[:int(0.90 * len(labels))]
-val_labels = labels[int(0.90 * len(labels)):]
+    def collate_fn(self, batch: Sequence[Sequence]) -> dict:
+        text_a = [f"query: {pair[0]}" for pair in batch]
+        text_b = [f"query: {pair[1]}" for pair in batch]
+        margins = [float(pair[2]) for pair in batch]
 
-# Define a custom sampler to create batches without repeating labels
-from collections import defaultdict
-import random
-from torch.utils.data import Sampler
+        encoded_a = self._encode(text_a)
+        encoded_b = self._encode(text_b)
 
-from collections import defaultdict
-import random
-from torch.utils.data import Sampler
+        return {
+            "text_pair1_token_ids": encoded_a["input_ids"].long(),
+            "text_pair1_attention_mask": encoded_a["attention_mask"].long(),
+            "text_pair2_token_ids": encoded_b["input_ids"].long(),
+            "text_pair2_attention_mask": encoded_b["attention_mask"].long(),
+            "margins": torch.tensor(margins, dtype=torch.float32),
+        }
 
-class NonRepeatingBatchSampler(Sampler):
-    def __init__(self, labels, batch_size):
-        self.labels = labels
+
+class NonRepeatingBatchSampler(Sampler[List[int]]):
+    """Sample batches without repeating label IDs inside a mini-batch."""
+
+    def __init__(self, labels: Sequence[Sequence[int]], batch_size: int, seed: int = 42):
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        self.labels = list(labels)
         self.batch_size = batch_size
-        self.index_to_labels = defaultdict(list)
+        self.seed = seed
+        self.epoch = 0
 
-        # Organize labels
-        for idx, label in enumerate(labels):
-            if isinstance(label, (tuple, list)) and len(label) >= 2:
-                self.index_to_labels[idx].extend(label[:2])  # Store the first two labels
-            else:
-                raise ValueError("Expected each label to have at least two elements.")
-        
-        self.batches = self._create_batches()
+    def __len__(self) -> int:
+        if not self.labels:
+            return 0
+        return math.ceil(len(self.labels) / self.batch_size)
 
-    def _create_batches(self):
-        batches = []
-        label_indices = list(self.index_to_labels.keys())
-        random.shuffle(label_indices)
+    def __iter__(self):
+        if not self.labels:
+            return
 
-        current_batch = []
+        rng = random.Random(self.seed + self.epoch)
+        self.epoch += 1
+
+        indices = list(range(len(self.labels)))
+        rng.shuffle(indices)
+
+        def label_pair(idx: int) -> Tuple[int, int]:
+            label = self.labels[idx]
+            if not isinstance(label, (list, tuple)) or len(label) < 2:
+                raise ValueError(f"Each label entry must contain at least two IDs. Got: {label!r}")
+            return int(label[0]), int(label[1])
+
+        batches: List[List[int]] = []
+        current_batch: List[int] = []
         current_labels = set()
-        leftovers = []
+        leftovers: List[int] = []
 
-        for idx in label_indices:
-            labels = self.index_to_labels[idx]
-
-            # Check if adding this index will repeat any label
-            if labels[0] not in current_labels and labels[1] not in current_labels:
+        for idx in indices:
+            a, b = label_pair(idx)
+            if a not in current_labels and b not in current_labels:
                 current_batch.append(idx)
-                current_labels.update(labels)
-
-                # If we've reached the desired batch size, store the batch
+                current_labels.update({a, b})
                 if len(current_batch) == self.batch_size:
                     batches.append(current_batch)
                     current_batch = []
-                    current_labels = set()
+                    current_labels.clear()
             else:
-                # If it can't be added to the current batch, add to leftovers
                 leftovers.append(idx)
 
-        # Try to use leftovers to create additional batches
-        max_attempts = len(leftovers)  # To avoid infinite loop if no valid batches can be formed
         attempts = 0
+        max_attempts = len(leftovers)
         while leftovers and attempts < max_attempts:
             idx = leftovers.pop(0)
-            labels = self.index_to_labels[idx]
-
-            # Try to add leftover indices to the current batch if possible
-            if labels[0] not in current_labels and labels[1] not in current_labels:
+            a, b = label_pair(idx)
+            if a not in current_labels and b not in current_labels:
                 current_batch.append(idx)
-                current_labels.update(labels)
+                current_labels.update({a, b})
             else:
-                # If it still can't be added, put it back to the end of leftovers
                 leftovers.append(idx)
 
-            # If we've reached the desired batch size, store the batch
             if len(current_batch) == self.batch_size:
                 batches.append(current_batch)
                 current_batch = []
-                current_labels = set()
-            
+                current_labels.clear()
+
             attempts += 1
 
-        # Handle any remaining items that couldn't form a full batch
         if current_batch:
             batches.append(current_batch)
 
-        return batches
-
-    def __iter__(self):
-        random.shuffle(self.batches)
-        for batch in self.batches:
+        rng.shuffle(batches)
+        for batch in batches:
             yield batch
 
-    def __len__(self):
-        return len(self.batches)
+
+def parse_args() -> TrainingConfig:
+    parser = argparse.ArgumentParser(description="Train AngIE multilingual embeddings.")
+    parser.add_argument("--train-path", type=Path, required=True, help="Path to the training JSONL file.")
+    parser.add_argument("--val-path", type=Path, default=None, help="Optional path to a separate validation JSONL file.")
+    parser.add_argument("--output-dir", type=Path, required=True, help="Directory for checkpoints and optimizer states.")
+    parser.add_argument("--model-name", type=str, default="intfloat/multilingual-e5-base", help="Base model identifier.")
+    parser.add_argument("--tokenizer-name", type=str, default=None, help="Tokenizer identifier (defaults to model name).")
+    parser.add_argument("--cache-dir", type=str, default=None, help="Optional Hugging Face cache directory.")
+    parser.add_argument("--batch-size", type=int, default=16, help="Mini-batch size.")
+    parser.add_argument("--embedding-size", type=int, default=768, help="Hidden size used for projection truncation.")
+    parser.add_argument("--learning-rate", type=float, default=2e-5, help="Learning rate for AdamW.")
+    parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs.")
+    parser.add_argument("--validation-interval", type=int, default=1_000, help="Validate every N update steps (<=0 disables intra-epoch validation).")
+    parser.add_argument("--val-ratio", type=float, default=0.1, help="Hold-out ratio when no validation set is provided.")
+    parser.add_argument("--random-seed", type=int, default=42, help="Seed for deterministic shuffling.")
+    parser.add_argument("--max-length", type=int, default=512, help="Maximum sequence length for tokenization.")
+    parser.add_argument("--positive-margin-threshold", type=float, default=0.75, help="Margins above this threshold are treated as positive (set to 1.0).")
+    parser.add_argument("--num-workers", type=int, default=0, help="Number of DataLoader workers.")
+    parser.add_argument("--disable-label-sampler", action="store_true", help="Use simple shuffled batching instead of the custom label-balanced sampler.")
+
+    args = parser.parse_args()
+    return TrainingConfig(
+        train_path=args.train_path,
+        val_path=args.val_path,
+        output_dir=args.output_dir,
+        model_name=args.model_name,
+        tokenizer_name=args.tokenizer_name,
+        cache_dir=args.cache_dir,
+        batch_size=args.batch_size,
+        embedding_size=args.embedding_size,
+        learning_rate=args.learning_rate,
+        epochs=args.epochs,
+        validation_interval=args.validation_interval,
+        val_ratio=args.val_ratio,
+        random_seed=args.random_seed,
+        max_length=args.max_length,
+        positive_margin_threshold=args.positive_margin_threshold,
+        num_workers=args.num_workers,
+        use_label_sampler=not args.disable_label_sampler,
+    )
 
 
-# Instantiate samplers for training and validation data
-train_sampler = NonRepeatingBatchSampler(train_labels, BATCH_SIZE)
-val_sampler = NonRepeatingBatchSampler(val_labels, BATCH_SIZE)
-
-# Define a custom Dataset class for embeddings
-class EmbeddingDataset(Dataset):
-    def __init__(self, dataset, args):
-        self.dataset = dataset
-        self.p = args
-        self.tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
-    
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, idx):
-        return self.dataset[idx]
-
-    def pad_data(self, data):
-        text_pair1 = ["query: " + str(x[0]) for x in data]
-        text_pair2 = ["query: " + str(x[1]) for x in data]
-        margins = [float(x[2]) for x in data]
-
-        text_pair1_encoding = self.tokenizer(text_pair1, return_tensors='pt', max_length=512, padding=True, truncation=True)
-        text_pair2_encoding = self.tokenizer(text_pair2, return_tensors='pt', max_length=512, padding=True, truncation=True)
-
-        text_pair1_token_ids = torch.LongTensor(text_pair1_encoding['input_ids'])
-        text_pair1_attention_mask = torch.LongTensor(text_pair1_encoding['attention_mask'])
-        text_pair2_token_ids = torch.LongTensor(text_pair2_encoding['input_ids'])
-        text_pair2_attention_mask = torch.LongTensor(text_pair2_encoding['attention_mask'])
-
-        return (text_pair1_token_ids, text_pair1_attention_mask,
-                text_pair2_token_ids, text_pair2_attention_mask, margins)
-
-    def collate_fn(self, all_data):
-        (text_pair1_token_ids, text_pair1_attention_mask,
-         text_pair2_token_ids, text_pair2_attention_mask, margins) = self.pad_data(all_data)
-
-        batched_data = {
-                'text_pair1_token_ids': text_pair1_token_ids,
-                'text_pair1_attention_mask': text_pair1_attention_mask,
-                'text_pair2_token_ids': text_pair2_token_ids,
-                'text_pair2_attention_mask': text_pair2_attention_mask,
-                'margins': margins
-            }
-
-        return batched_data
-
-# Initialize training and validation datasets and dataloaders
-args = Object()
-args.tokenizer = 'intfloat/multilingual-e5-base'
-
-train_data = EmbeddingDataset(train_dataset, args)
-train_data_dataloader = DataLoader(train_data, batch_sampler=train_sampler, collate_fn=train_data.collate_fn)
-
-val_data = EmbeddingDataset(val_dataset, args)
-val_data_dataloader = DataLoader(val_data, batch_sampler=val_sampler, collate_fn=val_data.collate_fn)
-
-# Initialize the model and tokenizer
-tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, cache_dir='cache', use_fast=False)
-model = AutoModel.from_pretrained(args.tokenizer, cache_dir='cache')
-model = model.to(device)
-model = model.train()
-
-# Mean Pooling function to average token embeddings
-def mean_pooling(model_output, attention_mask):
-    token_embeddings = model_output[0]
-    input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-    return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
-
-# Custom cosine loss function. Adapted from: https://github.com/SeanLee97/AnglE
-def cosine_loss(y_true, y_pred, tau = 20.0) -> torch.Tensor:
-    y_true = (y_true[:, None] < y_true[None, :]).float()
-    y_pred = F.normalize(y_pred, p=2, dim=1)
-    y_pred = torch.sum(y_pred[::2] * y_pred[1::2], dim=1) * tau
-    y_pred = y_pred[:, None] - y_pred[None, :]
-    y_pred = (y_pred - (1 - y_true) * 1e12).view(-1)
-    zero = torch.Tensor([0]).to(y_pred.device)
-    y_pred = torch.concat((zero, y_pred), dim=0)
-    return torch.logsumexp(y_pred, dim=0)
-
-# Custom angle loss function. Adapted from https://github.com/SeanLee97/AnglE
-def angle_loss(y_true, y_pred, tau=1.0, pooling_strategy='sum'):
-    y_true = (y_true[:, None] < y_true[None, :]).float()
-    y_pred_re, y_pred_im = torch.chunk(y_pred, 2, dim=1)
-    a = y_pred_re[::2]
-    b = y_pred_im[::2]
-    c = y_pred_re[1::2]
-    d = y_pred_im[1::2]
-
-    z = torch.sum(c**2 + d**2, dim=1, keepdim=True)
-    re = (a * c + b * d) / z
-    im = (b * c - a * d) / z
-
-    dz = torch.sum(a**2 + b**2, dim=1, keepdim=True)**0.5
-    dw = torch.sum(c**2 + d**2, dim=1, keepdim=True)**0.5
-    re /= (dz / dw)
-    im /= (dz / dw)
-
-    y_pred = torch.concat((re, im), dim=1)
-    if pooling_strategy == 'sum':
-        pooling = torch.sum(y_pred, dim=1)
-    elif pooling_strategy == 'mean':
-        pooling = torch.mean(y_pred, dim=1)
-    else:
-        raise ValueError(f'Unsupported pooling strategy: {pooling_strategy}')
-    y_pred = torch.abs(pooling) * tau  # absolute delta angle
-    y_pred = y_pred[:, None] - y_pred[None, :]
-    y_pred = (y_pred - (1 - y_true) * 1e12).view(-1)
-    zero = torch.Tensor([0]).to(y_pred.device)
-    y_pred = torch.concat((zero, y_pred), dim=0)
-    return torch.logsumexp(y_pred, dim=0)
-
-# Function to calculate loss. 
-def calculate_loss(embeddings_1_data_norm, embeddings_1_diff_data_norm, embeddings_2_data_norm, embeddings_2_diff_data_norm, b_margins):
-    temp = 0.05
-    data_full = torch.cat((embeddings_1_data_norm, embeddings_2_data_norm), dim=0)
-    data_full_diff = torch.cat((embeddings_1_diff_data_norm, embeddings_2_diff_data_norm), dim=0)
-    cosine_matrix = torch.mm(data_full, data_full_diff.t())
-    indices = torch.arange(embeddings_1_data_norm.size(0))
-    mask = torch.zeros(cosine_matrix.size(), dtype=torch.bool)
-    mask[indices, indices] = True
-    mask[indices, indices + len(embeddings_1_data_norm)] = True
-    mask[indices + len(embeddings_1_data_norm), indices] = True
-    mask[indices + len(embeddings_1_data_norm), indices + len(embeddings_1_data_norm)] = True
-    
-    top = torch.exp(cosine_matrix / temp) * mask.to(device)
-    top = torch.sum(top, dim=1)
-    bottom = torch.exp(cosine_matrix / temp)
-    bottom = torch.sum(bottom, dim=1)
-    loss = torch.sum(-torch.log(top / bottom))
-    return loss
-
-# Function to interleave rows for cosine angle loss
-def interleave_rows(tensor1, tensor2, embedding_size):
-    stacked = torch.stack((tensor1, tensor2), dim=0)
-    permuted = stacked.permute(1, 0, 2)
-    interleaved = permuted.reshape(-1, embedding_size)
-    return interleaved
-
-# Function to calculate cosine angle loss
-def calculate_cosine_angle_loss(embeddings_1_data_norm, embeddings_1_diff_data_norm, embeddings_2_data_norm, embeddings_2_diff_data_norm, b_margins, embedding_size):
-    combined_one = interleave_rows(embeddings_1_data_norm, embeddings_1_diff_data_norm, embedding_size)
-    combined_two = interleave_rows(embeddings_2_data_norm, embeddings_2_diff_data_norm, embedding_size)
-    combined_pair = interleave_rows(embeddings_1_data_norm, embeddings_2_data_norm, embedding_size)
-    combined_pair_diff = interleave_rows(embeddings_1_diff_data_norm, embeddings_2_diff_data_norm, embedding_size)
-    combined_all = torch.cat((combined_one, combined_two, combined_pair, combined_pair_diff), dim=0)
-    total_b_margins = torch.cat((torch.ones(embeddings_1_data_norm.size(0)), torch.ones(embeddings_1_data_norm.size(0)), torch.tensor(b_margins), torch.tensor(b_margins)), dim=0)
-    return cosine_loss(total_b_margins.to(device), combined_all) + angle_loss(total_b_margins.to(device), combined_all) + calculate_loss(embeddings_1_data_norm, embeddings_1_diff_data_norm, embeddings_2_data_norm, embeddings_2_diff_data_norm, b_margins)
-
-# Optimizer setup
-opt = torch.optim.AdamW(model.parameters(), lr=2e-5)
+def setup_logging() -> None:
+    logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 
 
-
-def model_eval(dataloader, model, device):
-    """
-    Evaluate the model on the provided dataloader.
-    
-    Args:
-    - dataloader (DataLoader): The data loader containing validation data.
-    - model (nn.Module): The model to evaluate.
-    - device (torch.device): The device to run the model on (CPU or GPU).
-    
-    Returns:
-    - total_loss (float): The total loss over the validation dataset.
-    """
-    
-    model.eval()  # Switch the model to evaluation mode (disables dropout, etc.)
-    
-    with torch.no_grad():  # Disable gradient computation
-        total_loss = 0 
-        
-        # Iterate over batches in the dataloader
-        for batch in tqdm(dataloader, desc='Evaluation in progress'):
-            # Extract batch data and move to the specified device
-            b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_margins = (
-                batch['text_pair1_token_ids'],
-                batch['text_pair1_attention_mask'], 
-                batch['text_pair2_token_ids'], 
-                batch['text_pair2_attention_mask'],
-                batch['margins']
-            )
-            
-            b_ids_1 = b_ids_1.to(device)
-            b_mask_1 = b_mask_1.to(device)
-            b_ids_2 = b_ids_2.to(device)
-            b_mask_2 = b_mask_2.to(device)
-            b_margins = torch.tensor(b_margins).to(device)
-
-            # Get embeddings for the first and second text pairs
-            embeddings_1 = model(b_ids_1, b_mask_1)
-            embeddings_1 = mean_pooling(embeddings_1, b_mask_1)
-        
-            embeddings_1_diff = model(b_ids_1, b_mask_1)
-            embeddings_1_diff = mean_pooling(embeddings_1_diff, b_mask_1)
-        
-            embeddings_2 = model(b_ids_2, b_mask_2)
-            embeddings_2 = mean_pooling(embeddings_2, b_mask_2)
-        
-            embeddings_2_diff = model(b_ids_2, b_mask_2)
-            embeddings_2_diff = mean_pooling(embeddings_2_diff, b_mask_2)
-
-            # Compute third embeddings (Matryoshka approach)
-            embeddings_1_third = embeddings_1[:, :int(EMBEDDING_SIZE/1)]
-            embeddings_1_diff_third  = embeddings_1_diff[:, :int(EMBEDDING_SIZE/1)]
-            embeddings_2_third  = embeddings_2[:, :int(EMBEDDING_SIZE/1)]
-            embeddings_2_diff_third = embeddings_2_diff[:, :int(EMBEDDING_SIZE/1)]
-            
-            # Normalize embeddings
-            embeddings_1_norms_third = embeddings_1_third.norm(dim=1, keepdim=True)
-            embeddings_1_data_norm_third = embeddings_1_third / embeddings_1_norms_third
-            
-            embeddings_1_diff_norms_third = embeddings_1_diff_third.norm(dim=1, keepdim=True)
-            embeddings_1_diff_data_norm_third = embeddings_1_diff_third / embeddings_1_diff_norms_third
-            
-            embeddings_2_norms_third = embeddings_2_third.norm(dim=1, keepdim=True)
-            embeddings_2_data_norm_third = embeddings_2_third / embeddings_2_norms_third
-            
-            embeddings_2_diff_norms_third = embeddings_2_diff_third.norm(dim=1, keepdim=True)
-            embeddings_2_diff_data_norm_third = embeddings_2_diff_third / embeddings_2_diff_norms_third
-
-            # Adjust margins for high-margin cases
-            indices_high = (b_margins == 0.75).nonzero(as_tuple=True)[0]
-            b_margins_third = b_margins.clone()
-            b_margins_third[indices_high] = 1
-    
-            # Calculate the loss using cosine angle difference
-            loss = calculate_cosine_angle_loss(
-                embeddings_1_data_norm_third, 
-                embeddings_1_diff_data_norm_third, 
-                embeddings_2_data_norm_third, 
-                embeddings_2_diff_data_norm_third,
-                b_margins_third,
-                int(EMBEDDING_SIZE/1)
-            ) / BATCH_SIZE
-        
-            total_loss += float(loss.item())  # Accumulate the loss
-    
-        return total_loss  # Return the total loss over the dataset
+def set_random_seed(seed: int) -> None:
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
-
-# Directory setup for saving models
-import os
-if not os.path.isdir('FOLDER'):
-    os.mkdir('FOLDER')
-
-import torch
-from tqdm import tqdm
-
-# Initialize epoch count and set a very high initial minimum loss value
-epoch = 0
-minimum_loss = float('inf')
-
-# Loop over epochs (up to a very large number, acting as an infinite loop until manually stopped)
-for epoch in range(0, 1000000):
-    num_batches = 0  # Counter for the number of batches processed
-    model.train()  # Set the model to training mode
-
-    # Iterate over batches in the training dataloader
-    for batch in tqdm(train_data_dataloader, desc=f'train-{epoch}'):
-        # Extract batch data and move to the specified device (e.g., GPU)
-        b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_margins = (
-            batch['text_pair1_token_ids'],
-            batch['text_pair1_attention_mask'], 
-            batch['text_pair2_token_ids'], 
-            batch['text_pair2_attention_mask'], 
-            batch['margins']
-        )
-        
-        # Reset the gradients of the optimizer
-        opt.zero_grad()
-
-        # Move the data to the specified device
-        b_ids_1, b_mask_1 = b_ids_1.to(device), b_mask_1.to(device)
-        b_ids_2, b_mask_2 = b_ids_2.to(device), b_mask_2.to(device)
-        b_margins = torch.tensor(b_margins).to(device)
-
-        # Get embeddings for the first and second text pairs
-        embeddings_1 = model(b_ids_1, b_mask_1)
-        embeddings_1 = mean_pooling(embeddings_1, b_mask_1)
-    
-        embeddings_1_diff = model(b_ids_1, b_mask_1)
-        embeddings_1_diff = mean_pooling(embeddings_1_diff, b_mask_1)
-    
-        embeddings_2 = model(b_ids_2, b_mask_2)
-        embeddings_2 = mean_pooling(embeddings_2, b_mask_2)
-    
-        embeddings_2_diff = model(b_ids_2, b_mask_2)
-        embeddings_2_diff = mean_pooling(embeddings_2_diff, b_mask_2)
-
-        # Compute third embeddings (Matryoshka approach)
-        embeddings_1_third = embeddings_1[:, :int(EMBEDDING_SIZE / 1)]
-        embeddings_1_diff_third = embeddings_1_diff[:, :int(EMBEDDING_SIZE / 1)]
-        embeddings_2_third = embeddings_2[:, :int(EMBEDDING_SIZE / 1)]
-        embeddings_2_diff_third = embeddings_2_diff[:, :int(EMBEDDING_SIZE / 1)]
-        
-        # Normalize the embeddings
-        embeddings_1_norms_third = embeddings_1_third.norm(dim=1, keepdim=True)
-        embeddings_1_data_norm_third = embeddings_1_third / embeddings_1_norms_third
-        
-        embeddings_1_diff_norms_third = embeddings_1_diff_third.norm(dim=1, keepdim=True)
-        embeddings_1_diff_data_norm_third = embeddings_1_diff_third / embeddings_1_diff_norms_third
-        
-        embeddings_2_norms_third = embeddings_2_third.norm(dim=1, keepdim=True)
-        embeddings_2_data_norm_third = embeddings_2_third / embeddings_2_norms_third
-        
-        embeddings_2_diff_norms_third = embeddings_2_diff_third.norm(dim=1, keepdim=True)
-        embeddings_2_diff_data_norm_third = embeddings_2_diff_third / embeddings_2_diff_norms_third
-
-        # Adjust margins for high-margin cases
-        indices_high = (b_margins == 0.75).nonzero(as_tuple=True)[0]
-        b_margins_third = b_margins.clone()
-        b_margins_third[indices_high] = 1
-
-        # Calculate the loss using cosine angle difference and normalize by batch size
-        loss = calculate_cosine_angle_loss(
-            embeddings_1_data_norm_third, 
-            embeddings_1_diff_data_norm_third, 
-            embeddings_2_data_norm_third, 
-            embeddings_2_diff_data_norm_third,
-            b_margins_third,
-            int(EMBEDDING_SIZE / 1)
-        ) / BATCH_SIZE
-        
-        num_batches += 1  # Increment the batch counter
-
-        # Backpropagation and optimizer step
-        loss.backward()
-        opt.step()
-
-        # Periodically evaluate the model on validation data
-        if num_batches % 1000 == 0:
-            validation_loss = model_eval(val_data_dataloader, model, device)
-            if validation_loss < minimum_loss:
-                # Save the model if the validation loss decreases
-                try:
-                    torch.save(
-                        model.state_dict(), 
-                        f'non-multilingual-matryoshka-xlm-roberta-base-calculate_cosine_angle_loss-fixed-regular/20240808-non-multilingual-matryoshka-mpnet-calculate_cosine_angle_loss-base{epoch}-{num_batches}.pt'
-                    )
-                except Exception as e:
-                    print(e)
-                minimum_loss = validation_loss  # Update the minimum loss
-
-        # Log the training loss
-        try:
-            with open('loss.txt', 'a+') as f:
-                f.write(str(loss.item()) + "\n")
-        except Exception as e:
-            print(e)
-    
-    # Evaluate the model on the validation set and save if it's the best one
-    try:
-        validation_loss = model_eval(val_data_dataloader, model, device)
-        if validation_loss < minimum_loss:
+def read_pairs(path: Path) -> List[Tuple[str, str, str, str, float]]:
+    entries: List[Tuple[str, str, str, str, float]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_num, raw_line in enumerate(handle, start=1):
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
             try:
-                torch.save(model.state_dict(), f'FOLDER/model-{epoch}-{num_batches}.pt')
-            except Exception as e:
-                print(e)
-            minimum_loss = validation_loss  # Update minimum loss
-    except Exception as e:
-        print(e)
+                record = json.loads(raw_line)
+            except json.JSONDecodeError as exc:
+                logging.warning("Skipping line %s in %s due to JSON error: %s", line_num, path, exc)
+                continue
+
+            try:
+                url_a, text_a, url_b, text_b = record[0], record[1], record[2], record[3]
+                margin = float(record[-1])
+            except (IndexError, TypeError, ValueError) as exc:
+                logging.warning("Skipping malformed record at line %s in %s: %s", line_num, path, exc)
+                continue
+
+            entries.append((url_a, text_a, url_b, text_b, margin))
+
+    logging.info("Loaded %s pairs from %s", len(entries), path)
+    return entries
+
+
+def assign_url_labels(entries: Sequence[Tuple[str, str, str, str, float]]) -> dict:
+    graph: defaultdict[str, set[str]] = defaultdict(set)
+    all_urls: set[str] = set()
+
+    for url_a, _text_a, url_b, _text_b, margin in entries:
+        all_urls.update({url_a, url_b})
+        if margin > 0:
+            graph[url_a].add(url_b)
+            graph[url_b].add(url_a)
+
+    for url in all_urls:
+        graph.setdefault(url, set())
+
+    labels: dict[str, int] = {}
+    label_id = 0
+
+    for url in sorted(all_urls):
+        if url in labels:
+            continue
+        stack = [url]
+        while stack:
+            current = stack.pop()
+            if current in labels:
+                continue
+            labels[current] = label_id
+            stack.extend(sorted(neighbour for neighbour in graph[current] if neighbour not in labels))
+        label_id += 1
+
+    return labels
+
+
+def prepare_dataset(entries: Sequence[Tuple[str, str, str, str, float]]) -> Tuple[List[List], List[List[int]]]:
+    url_to_label = assign_url_labels(entries)
+    dataset: List[List] = []
+    label_pairs: List[List[int]] = []
+
+    for url_a, text_a, url_b, text_b, margin in entries:
+        dataset.append([text_a, text_b, float(margin)])
+        label_pairs.append([url_to_label[url_a], url_to_label[url_b]])
+
+    return dataset, label_pairs
+
+
+def load_dataset_with_labels(path: Path) -> Tuple[List[List], List[List[int]]]:
+    entries = read_pairs(path)
+    return prepare_dataset(entries)
+
+
+def split_train_val(
+    dataset: List[List],
+    labels: List[List[int]],
+    *,
+    val_ratio: float,
+    seed: int,
+) -> Tuple[List[List], List[List[int]], List[List], List[List[int]]]:
+    if not dataset:
+        return dataset, labels, [], []
+
+    if val_ratio <= 0:
+        return dataset, labels, [], []
+
+    if val_ratio >= 1:
+        raise ValueError("val_ratio must be in the range (0, 1) when no explicit validation path is provided")
+
+    combined = list(zip(dataset, labels))
+    rng = random.Random(seed)
+    rng.shuffle(combined)
+
+    split_index = max(1, int(len(combined) * (1 - val_ratio)))
+    train_combined = combined[:split_index]
+    val_combined = combined[split_index:]
+
+    train_dataset, train_labels = zip(*train_combined) if train_combined else ([], [])
+    val_dataset, val_labels = zip(*val_combined) if val_combined else ([], [])
+
+    return list(train_dataset), list(train_labels), list(val_dataset), list(val_labels)
+
+
+def get_device() -> torch.device:
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        logging.info("Using CUDA device: %s", torch.cuda.get_device_name(0))
+        torch.cuda.empty_cache()
+    else:
+        device = torch.device("cpu")
+        logging.info("CUDA unavailable; falling back to CPU.")
+    return device
+
+
+def mean_pooling(model_output, attention_mask: torch.Tensor) -> torch.Tensor:
+    token_embeddings = model_output[0]
+    mask = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+    return torch.sum(token_embeddings * mask, dim=1) / torch.clamp(mask.sum(dim=1), min=1e-9)
+
+
+def encode_with_dropout(model: AutoModel, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    embeddings = mean_pooling(model(input_ids=input_ids, attention_mask=attention_mask), attention_mask)
+    embeddings_diff = mean_pooling(model(input_ids=input_ids, attention_mask=attention_mask), attention_mask)
+    return embeddings, embeddings_diff
+
+
+def contrastive_alignment_loss(
+    embeddings_1: torch.Tensor,
+    embeddings_1_diff: torch.Tensor,
+    embeddings_2: torch.Tensor,
+    embeddings_2_diff: torch.Tensor,
+    *,
+    device: torch.device,
+    temperature: float = 0.05,
+) -> torch.Tensor:
+    data_full = torch.cat((embeddings_1, embeddings_2), dim=0)
+    data_full_diff = torch.cat((embeddings_1_diff, embeddings_2_diff), dim=0)
+    similarity = torch.mm(data_full, data_full_diff.t()) / temperature
+
+    batch_size = embeddings_1.size(0)
+    indices = torch.arange(batch_size, device=device)
+
+    mask = torch.zeros_like(similarity, dtype=torch.bool, device=device)
+    mask[indices, indices] = True
+    mask[indices, indices + batch_size] = True
+    mask[indices + batch_size, indices] = True
+    mask[indices + batch_size, indices + batch_size] = True
+
+    numerator = torch.exp(similarity) * mask.float()
+    numerator = numerator.sum(dim=1)
+    denominator = torch.exp(similarity).sum(dim=1)
+    return -torch.log(numerator / denominator).sum()
+
+
+def cosine_loss(y_true: torch.Tensor, y_pred: torch.Tensor, tau: float = 20.0) -> torch.Tensor:
+    order_matrix = (y_true[:, None] < y_true[None, :]).float()
+    normalized = F.normalize(y_pred, p=2, dim=1)
+    similarities = torch.sum(normalized[::2] * normalized[1::2], dim=1) * tau
+    differences = similarities[:, None] - similarities[None, :]
+    differences = (differences - (1 - order_matrix) * 1e12).reshape(-1)
+    zero = torch.tensor([0.0], device=differences.device)
+    differences = torch.cat((zero, differences), dim=0)
+    return torch.logsumexp(differences, dim=0)
+
+
+def angle_loss(
+    y_true: torch.Tensor,
+    y_pred: torch.Tensor,
+    tau: float = 1.0,
+    pooling_strategy: str = "sum",
+) -> torch.Tensor:
+    order_matrix = (y_true[:, None] < y_true[None, :]).float()
+
+    real_part, imag_part = torch.chunk(y_pred, 2, dim=1)
+    a, b = real_part[::2], imag_part[::2]
+    c, d = real_part[1::2], imag_part[1::2]
+
+    denominator = torch.sum(c**2 + d**2, dim=1, keepdim=True)
+    real = (a * c + b * d) / denominator
+    imag = (b * c - a * d) / denominator
+
+    dz = torch.sum(a**2 + b**2, dim=1, keepdim=True).sqrt()
+    dw = torch.sum(c**2 + d**2, dim=1, keepdim=True).sqrt()
+    scale = dz / dw
+    real /= scale
+    imag /= scale
+
+    pooled = torch.cat((real, imag), dim=1)
+    if pooling_strategy == "sum":
+        pooled = torch.sum(pooled, dim=1)
+    elif pooling_strategy == "mean":
+        pooled = torch.mean(pooled, dim=1)
+    else:
+        raise ValueError(f"Unsupported pooling strategy: {pooling_strategy}")
+
+    pooled = torch.abs(pooled) * tau
+    differences = pooled[:, None] - pooled[None, :]
+    differences = (differences - (1 - order_matrix) * 1e12).reshape(-1)
+    zero = torch.tensor([0.0], device=differences.device)
+    differences = torch.cat((zero, differences), dim=0)
+    return torch.logsumexp(differences, dim=0)
+
+
+def interleave_rows(tensor_a: torch.Tensor, tensor_b: torch.Tensor) -> torch.Tensor:
+    return torch.stack((tensor_a, tensor_b), dim=1).reshape(-1, tensor_a.size(1))
+
+
+def calculate_cosine_angle_loss(
+    embeddings_1: torch.Tensor,
+    embeddings_1_diff: torch.Tensor,
+    embeddings_2: torch.Tensor,
+    embeddings_2_diff: torch.Tensor,
+    margins: torch.Tensor,
+    *,
+    device: torch.device,
+) -> torch.Tensor:
+    combined = torch.cat(
+        (
+            interleave_rows(embeddings_1, embeddings_1_diff),
+            interleave_rows(embeddings_2, embeddings_2_diff),
+            interleave_rows(embeddings_1, embeddings_2),
+            interleave_rows(embeddings_1_diff, embeddings_2_diff),
+        ),
+        dim=0,
+    )
+
+    batch_size = embeddings_1.size(0)
+    positives = torch.ones(batch_size, device=device)
+    labels = torch.cat((positives, positives, margins, margins), dim=0)
+
+    pairwise_loss = cosine_loss(labels, combined) + angle_loss(labels, combined)
+    alignment_loss = contrastive_alignment_loss(embeddings_1, embeddings_1_diff, embeddings_2, embeddings_2_diff, device=device)
+    return pairwise_loss + alignment_loss
+
+
+def forward_batch(model: AutoModel, batch: dict, device: torch.device, config: TrainingConfig) -> torch.Tensor:
+    input_a = batch["text_pair1_token_ids"].to(device)
+    mask_a = batch["text_pair1_attention_mask"].to(device)
+    input_b = batch["text_pair2_token_ids"].to(device)
+    mask_b = batch["text_pair2_attention_mask"].to(device)
+    margins = batch["margins"].to(device)
+
+    embeddings_a, embeddings_a_diff = encode_with_dropout(model, input_a, mask_a)
+    embeddings_b, embeddings_b_diff = encode_with_dropout(model, input_b, mask_b)
+
+    embedding_dim = min(config.embedding_size, embeddings_a.size(1))
+
+    views = (
+        F.normalize(embeddings_a[:, :embedding_dim], p=2, dim=1),
+        F.normalize(embeddings_a_diff[:, :embedding_dim], p=2, dim=1),
+        F.normalize(embeddings_b[:, :embedding_dim], p=2, dim=1),
+        F.normalize(embeddings_b_diff[:, :embedding_dim], p=2, dim=1),
+    )
+
+    adjusted_margins = torch.where(
+        margins >= config.positive_margin_threshold,
+        torch.ones_like(margins),
+        margins,
+    )
+
+    loss = calculate_cosine_angle_loss(*views, margins=adjusted_margins, device=device)
+    batch_size = max(1, margins.size(0))
+    return loss / batch_size
+
+
+def evaluate(model: AutoModel, dataloader: DataLoader, device: torch.device, config: TrainingConfig) -> float:
+    model.eval()
+    losses: List[float] = []
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="eval", leave=False):
+            batch_loss = forward_batch(model, batch, device, config)
+            losses.append(batch_loss.item())
+    return float(sum(losses) / len(losses)) if losses else 0.0
+
+
+def save_checkpoint(
+    model: AutoModel,
+    optimizer: torch.optim.Optimizer,
+    epoch: int,
+    global_step: int,
+    output_dir: Path,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    model_path = output_dir / f"model-epoch{epoch}-step{global_step}.pt"
+    optimizer_path = output_dir / f"optimizer-epoch{epoch}-step{global_step}.pt"
+    torch.save(model.state_dict(), model_path)
+    torch.save({"epoch": epoch, "global_step": global_step, "optimizer_state_dict": optimizer.state_dict()}, optimizer_path)
+    logging.info("Saved checkpoint to %s", model_path)
+
+
+def build_dataloaders(
+    config: TrainingConfig,
+    tokenizer: AutoTokenizer,
+) -> Tuple[DataLoader, Optional[DataLoader]]:
+    train_dataset_raw, train_labels = load_dataset_with_labels(config.train_path)
+
+    if config.val_path:
+        val_dataset_raw, _ = load_dataset_with_labels(config.val_path)
+    else:
+        train_dataset_raw, train_labels, val_dataset_raw, _ = split_train_val(
+            train_dataset_raw,
+            train_labels,
+            val_ratio=config.val_ratio,
+            seed=config.random_seed,
+        )
+
+    train_dataset = EmbeddingDataset(train_dataset_raw, tokenizer, max_length=config.max_length)
+
+    if config.use_label_sampler and train_labels:
+        sampler = NonRepeatingBatchSampler(train_labels, config.batch_size, seed=config.random_seed)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=sampler,
+            collate_fn=train_dataset.collate_fn,
+            num_workers=config.num_workers,
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config.batch_size,
+            shuffle=True,
+            collate_fn=train_dataset.collate_fn,
+            num_workers=config.num_workers,
+        )
+
+    val_loader: Optional[DataLoader] = None
+    if val_dataset_raw:
+        val_dataset = EmbeddingDataset(val_dataset_raw, tokenizer, max_length=config.max_length)
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=config.batch_size,
+            shuffle=False,
+            collate_fn=val_dataset.collate_fn,
+            num_workers=config.num_workers,
+        )
+
+    return train_loader, val_loader
+
+
+def train(config: TrainingConfig) -> None:
+    setup_logging()
+    logging.info("Configuration: %s", config)
+    set_random_seed(config.random_seed)
+
+    device = get_device()
+
+    tokenizer = AutoTokenizer.from_pretrained(config.resolved_tokenizer(), cache_dir=config.cache_dir, use_fast=False)
+    model = AutoModel.from_pretrained(config.model_name, cache_dir=config.cache_dir)
+    model.to(device)
+
+    train_loader, val_loader = build_dataloaders(config, tokenizer)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
+
+    best_val_loss = float("inf")
+    global_step = 0
+
+    for epoch in range(config.epochs):
+        model.train()
+        running_loss = 0.0
+        progress = tqdm(train_loader, desc=f"train-{epoch}")
+
+        for batch in progress:
+            optimizer.zero_grad()
+            batch_loss = forward_batch(model, batch, device, config)
+            batch_loss.backward()
+            optimizer.step()
+
+            global_step += 1
+            running_loss += batch_loss.item()
+            progress.set_postfix({"loss": batch_loss.item()})
+
+            if (
+                val_loader is not None
+                and config.validation_interval > 0
+                and global_step % config.validation_interval == 0
+            ):
+                val_loss = evaluate(model, val_loader, device, config)
+                logging.info("Step %s | validation loss: %.5f", global_step, val_loss)
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    save_checkpoint(model, optimizer, epoch, global_step, config.output_dir)
+                model.train()
+
+        epoch_loss = running_loss / max(1, len(train_loader))
+        logging.info("Epoch %s | training loss: %.5f", epoch, epoch_loss)
+
+        if val_loader is not None:
+            val_loss = evaluate(model, val_loader, device, config)
+            logging.info("Epoch %s | validation loss: %.5f", epoch, val_loss)
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                save_checkpoint(model, optimizer, epoch, global_step, config.output_dir)
+
+    logging.info("Training complete. Best validation loss: %.5f", best_val_loss)
+
+
+if __name__ == "__main__":
+    train(parse_args())

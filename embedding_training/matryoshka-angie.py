@@ -1,555 +1,432 @@
-# Import necessary libraries
-import pandas as pd
-import torch
-import numpy as np
-import json
-import csv
-from torch.utils.data import Dataset, DataLoader, Sampler
-from transformers import AutoTokenizer, AutoModel, BertTokenizer, BertModel
-from torch import optim
-from datasets import load_dataset
-import re
-from tqdm import tqdm
-import random
+"""Matryoshka embedding training script.
+
+This refactored version exposes configuration via CLI arguments, avoids
+hard-coded file paths, and clarifies the training loop for publication.
+"""
+
+from __future__ import annotations
+
+import argparse
 import gc
-from collections import defaultdict
+import json
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, List, Optional, Sequence, Tuple
 
-# Set device to GPU if available
-torch.cuda.is_available()
-device = torch.cuda.current_device()
-torch.cuda.empty_cache()  # Clear GPU cache
-gc.collect()  # Garbage collection to free memory
-
-# Constants
-BATCH_SIZE = 16
-EMBEDDING_SIZE = 768
-
-
-BATCH_SIZE = 16
-EMBEDDING_SIZE= 768
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
+from transformers import AutoModel, AutoTokenizer
 
 
+@dataclass
+class TrainingConfig:
+    """Container for hyperparameters and paths used during training."""
 
-train_dataset = []
-train_lines_to_remove = []
-f = open('/mnt/projects/qanon_proj/Matryoshka/all_processed_datasets_w_entities_replaced-20241125.jsonl','r')
-ind = 0 
-for line in f:
-    try:
-        train_dataset.append(json.loads(line))
+    train_path: Path
+    val_path: Path
+    output_dir: Path
+    model_name: str = "intfloat/multilingual-e5-base"
+    tokenizer_name: Optional[str] = None
+    cache_dir: Optional[str] = None
+    batch_size: int = 16
+    embedding_size: int = 768
+    learning_rate: float = 2e-5
+    epochs: int = 5
+    validation_interval: int = 10_000
+    matryoshka_levels: Sequence[Tuple[float, float]] = (
+        (0.25, 0.25),
+        (0.50, 0.50),
+        (0.75, 1.00),
+    )
 
-    except Exception as e:
-        print(e)
-    if ind %100000 ==0:
-        print(ind)
-    ind+=1
-f.close()
-
-val_dataset = []
-f = open('/mnt/projects/qanon_proj/Matryoshka/validation_multilingual_final-20241008.jsonl','r')
-ind = 0 
-val_lines_to_remove = []
-
-for line in f:
-    try:
-        val_dataset.append(json.loads(line))
-        
-    except Exception as e:
-        print(e)
-    if ind %100000 ==0:
-        print(ind)
-    ind+=1
-    
-f.close()
-
+    def resolved_tokenizer(self) -> str:
+        return self.tokenizer_name or self.model_name
 
 
 class EmbeddingDataset(Dataset):
-    def __init__(self, dataset, args):
-        self.dataset = dataset
-        self.p = args
-        self.tokenizer =AutoTokenizer.from_pretrained(args.tokenizer)
-    def __len__(self):
-        return len(self.dataset)
+    """Pairs of texts with similarity margins for Matryoshka training."""
 
-    def __getitem__(self, idx):
-        return self.dataset[idx]
+    def __init__(self, pairs: Sequence[Sequence], tokenizer: AutoTokenizer, max_length: int = 512):
+        self.pairs = pairs
+        self.tokenizer = tokenizer
+        self.max_length = max_length
 
-    def pad_data(self, data):
-        text_pair1 = ["query: "+str(x[0]) for x in data]
-        text_pair2 = ["query: "+str(x[1]) for x in data]
-        margins = [float(x[2]) for x in data]
+    def __len__(self) -> int:  # pragma: no cover - simple delegation
+        return len(self.pairs)
 
-        text_pair1_encoding = self.tokenizer(text_pair1, return_tensors='pt', max_length=512, padding=True, truncation=True)
-        text_pair2_encoding = self.tokenizer(text_pair2, return_tensors='pt',  max_length=512,  padding=True, truncation=True)
+    def __getitem__(self, idx: int) -> Sequence:
+        sample = self.pairs[idx]
+        if not isinstance(sample, (list, tuple)) or len(sample) < 3:
+            raise ValueError(
+                "Each record must be an iterable with at least three elements (text_a, text_b, margin). "
+                f"Got index {idx} -> {sample!r}"
+            )
+        return sample
 
-        text_pair1_token_ids = torch.LongTensor(text_pair1_encoding['input_ids'])
-        text_pair1_attention_mask = torch.LongTensor(text_pair1_encoding['attention_mask'])
+    def _encode(self, texts: Iterable[str]) -> dict:
+        return self.tokenizer(
+            list(texts),
+            return_tensors="pt",
+            max_length=self.max_length,
+            padding=True,
+            truncation=True,
+        )
 
-        text_pair2_token_ids = torch.LongTensor(text_pair2_encoding['input_ids'])
-        text_pair2_attention_mask = torch.LongTensor(text_pair2_encoding['attention_mask'])
+    def collate_fn(self, batch: Sequence[Sequence]) -> dict:
+        text_a = [f"query: {pair[0]}" for pair in batch]
+        text_b = [f"query: {pair[1]}" for pair in batch]
+        margins = [float(pair[2]) for pair in batch]
 
+        encoded_a = self._encode(text_a)
+        encoded_b = self._encode(text_b)
 
-        return (text_pair1_token_ids, text_pair1_attention_mask,
-                text_pair2_token_ids, text_pair2_attention_mask, margins)
-
-    def collate_fn(self, all_data):
-        (text_pair1_token_ids,  text_pair1_attention_mask,
-         text_pair2_token_ids, text_pair2_attention_mask, margins) = self.pad_data(all_data)
-
-        batched_data = {
-                'text_pair1_token_ids': text_pair1_token_ids,
-                'text_pair1_attention_mask': text_pair1_attention_mask,
-                'text_pair2_token_ids': text_pair2_token_ids,
-                'text_pair2_attention_mask': text_pair2_attention_mask,
-                'margins': margins
-            }
-
-        return batched_data
-
-import random
-from transformers import AutoModel, AutoTokenizer
-class Object(object):
-    pass
-args = Object()
-model_name ='intfloat/multilingual-e5-base'
-args.tokenizer ='intfloat/multilingual-e5-base'
+        return {
+            "text_pair1_token_ids": encoded_a["input_ids"].long(),
+            "text_pair1_attention_mask": encoded_a["attention_mask"].long(),
+            "text_pair2_token_ids": encoded_b["input_ids"].long(),
+            "text_pair2_attention_mask": encoded_b["attention_mask"].long(),
+            "margins": torch.tensor(margins, dtype=torch.float32),
+        }
 
 
+def parse_args() -> TrainingConfig:
+    parser = argparse.ArgumentParser(description="Train Matryoshka multilingual embeddings.")
+    parser.add_argument("--train-path", type=Path, required=True, help="Path to the training JSONL file.")
+    parser.add_argument("--val-path", type=Path, required=True, help="Path to the validation JSONL file.")
+    parser.add_argument("--output-dir", type=Path, required=True, help="Directory to store checkpoints.")
+    parser.add_argument("--model-name", type=str, default="intfloat/multilingual-e5-base", help="Base model name on Hugging Face.")
+    parser.add_argument("--tokenizer-name", type=str, default=None, help="Tokenizer name (defaults to model name).")
+    parser.add_argument("--cache-dir", type=str, default=None, help="Optional cache directory for Hugging Face downloads.")
+    parser.add_argument("--batch-size", type=int, default=16, help="Mini-batch size.")
+    parser.add_argument("--embedding-size", type=int, default=768, help="Size of the base embedding.")
+    parser.add_argument("--learning-rate", type=float, default=2e-5, help="Learning rate for AdamW.")
+    parser.add_argument("--epochs", type=int, default=5, help="Number of epochs to train.")
+    parser.add_argument(
+        "--validation-interval",
+        type=int,
+        default=10_000,
+        help="Validate every N update steps (set <=0 to skip intermediate validation).",
+    )
 
-train_data = EmbeddingDataset(train_dataset, args)
-train_data_dataloader = DataLoader(train_data, shuffle=True,batch_size = BATCH_SIZE,
-                                      collate_fn=train_data.collate_fn)
-
-
-# In[19]:
-
-
-#train_data = EmbeddingDataset(train_dataset, args)
-val_data = EmbeddingDataset(val_dataset, args)
-val_data_dataloader = DataLoader(val_data,shuffle=True,batch_size = BATCH_SIZE,
-                                      collate_fn=val_data.collate_fn)
-
-
-# In[20]:
-import torch
-import gc
-torch.cuda.is_available()
-torch.cuda.current_device()
-torch.cuda.get_device_name(0)
-device = torch.cuda.current_device()
-torch.cuda.empty_cache()
-gc.collect()
-
-
-# Load model from HuggingFace Hub
-tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir= 'cache',use_fast =False)
-model = AutoModel.from_pretrained(model_name, cache_dir= 'cache')
-
-model = model.to(device)
-model = model.train()
-
-# In[21]:
-
+    args = parser.parse_args()
+    return TrainingConfig(
+        train_path=args.train_path,
+        val_path=args.val_path,
+        output_dir=args.output_dir,
+        model_name=args.model_name,
+        tokenizer_name=args.tokenizer_name,
+        cache_dir=args.cache_dir,
+        batch_size=args.batch_size,
+        embedding_size=args.embedding_size,
+        learning_rate=args.learning_rate,
+        epochs=args.epochs,
+        validation_interval=args.validation_interval,
+    )
 
 
-
-# In[22]:
-
-
-from transformers import AutoTokenizer, AutoModel
-import torch
+def setup_logging() -> None:
+    logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 
 
-#Mean Pooling - Take attention mask into account for correct averaging
-def mean_pooling(model_output, attention_mask):
-    token_embeddings = model_output[0] #First element of model_output contains all token embeddings
-    input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-    return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+def load_jsonl(path: Path) -> List[Sequence]:
+    if not path.exists():
+        raise FileNotFoundError(f"Dataset not found: {path}")
+
+    records: List[Sequence] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_num, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                logging.warning("Skipping line %s in %s due to JSON error: %s", line_num, path, exc)
+                continue
+            records.append(record)
+
+    logging.info("Loaded %s records from %s", len(records), path)
+    return records
 
 
-# In[23]:
+def get_device() -> torch.device:
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        logging.info("Using CUDA device: %s", torch.cuda.get_device_name(0))
+        torch.cuda.empty_cache()
+    else:
+        device = torch.device("cpu")
+        logging.info("CUDA unavailable; falling back to CPU.")
+    gc.collect()
+    return device
+
+
+def mean_pooling(model_output, attention_mask: torch.Tensor) -> torch.Tensor:
+    token_embeddings = model_output[0]
+    mask = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+    return torch.sum(token_embeddings * mask, dim=1) / torch.clamp(mask.sum(dim=1), min=1e-9)
+
+
+def encode_with_dropout(model: AutoModel, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    embedding = mean_pooling(model(input_ids=input_ids, attention_mask=attention_mask), attention_mask)
+    embedding_diff = mean_pooling(model(input_ids=input_ids, attention_mask=attention_mask), attention_mask)
+    return embedding, embedding_diff
+
+
+def binarize_margins(margins: torch.Tensor, threshold: float) -> torch.Tensor:
+    return torch.where(margins >= threshold, torch.ones_like(margins), torch.zeros_like(margins))
+
+
+def interleave_rows(tensor_a: torch.Tensor, tensor_b: torch.Tensor) -> torch.Tensor:
+    return torch.stack((tensor_a, tensor_b), dim=1).reshape(-1, tensor_a.size(1))
+
+
+def contrastive_loss(
+    embeddings_1: torch.Tensor,
+    embeddings_1_diff: torch.Tensor,
+    embeddings_2: torch.Tensor,
+    embeddings_2_diff: torch.Tensor,
+    *,
+    device: torch.device,
+    temperature: float = 0.05,
+) -> torch.Tensor:
+    data_full = torch.cat((embeddings_1, embeddings_2_diff), dim=0)
+    data_full_diff = torch.cat((embeddings_1_diff, embeddings_2), dim=0)
+    similarity = torch.mm(data_full, data_full_diff.t()) / temperature
+
+    batch_size = embeddings_1.size(0)
+    indices = torch.arange(batch_size, device=device)
+
+    mask = torch.zeros_like(similarity, dtype=torch.bool, device=device)
+    mask[indices, indices] = True
+    mask[indices, indices + batch_size] = True
+    mask[indices + batch_size, indices] = True
+    mask[indices + batch_size, indices + batch_size] = True
+
+    numerator = torch.exp(similarity) * mask.float()
+    numerator = numerator.sum(dim=1)
+    denominator = torch.exp(similarity).sum(dim=1)
+    return -torch.log(numerator / denominator).sum()
 
 
 def cosine_loss(y_true: torch.Tensor, y_pred: torch.Tensor, tau: float = 20.0) -> torch.Tensor:
-    """
-    Compute cosine loss
-
-    :param y_true: torch.Tensor, ground truth.
-        The y_true must be zigzag style, such as [x[0][0], x[0][1], x[1][0], x[1][1], ...], where (x[0][0], x[0][1]) stands for a pair.
-    :param y_pred: torch.Tensor, model output.
-        The y_pred must be zigzag style, such as [o[0][0], o[0][1], o[1][0], o[1][1], ...], where (o[0][0], o[0][1]) stands for a pair.
-    :param tau: float, scale factor, default 20
-
-    :return: torch.Tensor, loss value
-    """  # NOQA
-    # modified from: https://github.com/bojone/CoSENT/blob/124c368efc8a4b179469be99cb6e62e1f2949d39/cosent20241130#L79
-    #y_true = y_true[::2, 0]
-    y_true = (y_true[:, None] < y_true[None, :]).float()
-    y_pred = F.normalize(y_pred, p=2, dim=1)
-    y_pred = torch.sum(y_pred[::2] * y_pred[1::2], dim=1) * tau
-    y_pred = y_pred[:, None] - y_pred[None, :]
-    y_pred = (y_pred - (1 - y_true) * 1e12).view(-1)
-    zero = torch.Tensor([0]).to(y_pred.device)
-    y_pred = torch.concat((zero, y_pred), dim=0)
-    return torch.logsumexp(y_pred, dim=0)
+    order_matrix = (y_true[:, None] < y_true[None, :]).float()
+    normalized = F.normalize(y_pred, p=2, dim=1)
+    similarities = torch.sum(normalized[::2] * normalized[1::2], dim=1) * tau
+    differences = similarities[:, None] - similarities[None, :]
+    differences = (differences - (1 - order_matrix) * 1e12).reshape(-1)
+    zero = torch.tensor([0.0], device=differences.device)
+    differences = torch.cat((zero, differences), dim=0)
+    return torch.logsumexp(differences, dim=0)
 
 
-# In[24]:
+def angle_loss(
+    y_true: torch.Tensor,
+    y_pred: torch.Tensor,
+    tau: float = 1.0,
+    pooling_strategy: str = "sum",
+) -> torch.Tensor:
+    order_matrix = (y_true[:, None] < y_true[None, :]).float()
 
+    real_part, imag_part = torch.chunk(y_pred, 2, dim=1)
+    a, b = real_part[::2], imag_part[::2]
+    c, d = real_part[1::2], imag_part[1::2]
 
-def angle_loss(y_true: torch.Tensor, y_pred: torch.Tensor, tau: float = 1.0, pooling_strategy: str = 'sum'):
-    """
-    Compute angle loss
+    denominator = torch.sum(c**2 + d**2, dim=1, keepdim=True)
+    real = (a * c + b * d) / denominator
+    imag = (b * c - a * d) / denominator
 
-    :param y_true: torch.Tensor, ground truth.
-        The y_true must be zigzag style, such as [x[0][0], x[0][1], x[1][0], x[1][1], ...], where (x[0][0], x[0][1]) stands for a pair.
-    :param y_pred: torch.Tensor, model output.
-        The y_pred must be zigzag style, such as [o[0][0], o[0][1], o[1][0], o[1][1], ...], where (o[0][0], o[0][1]) stands for a pair.
-    :param tau: float, scale factor, default 1.0
+    dz = torch.sum(a**2 + b**2, dim=1, keepdim=True).sqrt()
+    dw = torch.sum(c**2 + d**2, dim=1, keepdim=True).sqrt()
+    scale = dz / dw
+    real /= scale
+    imag /= scale
 
-    :return: torch.Tensor, loss value
-    """  # NOQA
-    #y_true = y_true[::2, 0]
-    y_true = (y_true[:, None] < y_true[None, :]).float()
-
-    y_pred_re, y_pred_im = torch.chunk(y_pred, 2, dim=1)
-    a = y_pred_re[::2]
-    b = y_pred_im[::2]
-    c = y_pred_re[1::2]
-    d = y_pred_im[1::2]
-
-    # (a+bi) / (c+di)
-    # = ((a+bi) * (c-di)) / ((c+di) * (c-di))
-    # = ((ac + bd) + i(bc - ad)) / (c^2 + d^2)
-    # = (ac + bd) / (c^2 + d^2) + i(bc - ad)/(c^2 + d^2)
-    z = torch.sum(c**2 + d**2, dim=1, keepdim=True)
-    re = (a * c + b * d) / z
-    im = (b * c - a * d) / z
-
-    dz = torch.sum(a**2 + b**2, dim=1, keepdim=True)**0.5
-    dw = torch.sum(c**2 + d**2, dim=1, keepdim=True)**0.5
-    re /= (dz / dw)
-    im /= (dz / dw)
-
-    y_pred = torch.concat((re, im), dim=1)
-    if pooling_strategy == 'sum':
-        pooling = torch.sum(y_pred, dim=1)
-    elif pooling_strategy == 'mean':
-        pooling = torch.mean(y_pred, dim=1)
+    pooled = torch.cat((real, imag), dim=1)
+    if pooling_strategy == "sum":
+        pooled = torch.sum(pooled, dim=1)
+    elif pooling_strategy == "mean":
+        pooled = torch.mean(pooled, dim=1)
     else:
-        raise ValueError(f'Unsupported pooling strategy: {pooling_strategy}')
-    y_pred = torch.abs(pooling) * tau  # absolute delta angle
-    y_pred = y_pred[:, None] - y_pred[None, :]
-    y_pred = (y_pred - (1 - y_true) * 1e12).view(-1)
-    zero = torch.Tensor([0]).to(y_pred.device)
-    y_pred = torch.concat((zero, y_pred), dim=0)
-    return torch.logsumexp(y_pred, dim=0)
+        raise ValueError(f"Unsupported pooling strategy: {pooling_strategy}")
+
+    pooled = torch.abs(pooled) * tau
+    differences = pooled[:, None] - pooled[None, :]
+    differences = (differences - (1 - order_matrix) * 1e12).reshape(-1)
+    zero = torch.tensor([0.0], device=differences.device)
+    differences = torch.cat((zero, differences), dim=0)
+    return torch.logsumexp(differences, dim=0)
 
 
-def calculate_loss(embeddings_1_data_norm, embeddings_1_diff_data_norm, embeddings_2_data_norm, embeddings_2_diff_data_norm, b_margins):
-    temp = 0.05
-    data_full = torch.cat((embeddings_1_data_norm, embeddings_2_diff_data_norm), dim=0)
-    data_full_diff = torch.cat((embeddings_1_diff_data_norm, embeddings_2_data_norm), dim=0)
-    cosine_matrix = torch.mm(data_full, data_full_diff.t())
-    indices = torch.arange(embeddings_1_data_norm.size(0))
-    mask = torch.zeros(cosine_matrix.size(), dtype=torch.bool)
-    mask[indices, indices] = True
-    mask[indices, indices + len(embeddings_1_data_norm)] = True
-    mask[indices + len(embeddings_1_data_norm), indices] = True
-    mask[indices + len(embeddings_1_data_norm), indices + len(embeddings_1_data_norm)] = True
-    
-    top = torch.exp(cosine_matrix / temp) * mask.to(device)
-    top = torch.sum(top, dim=1)
-    bottom = torch.exp(cosine_matrix / temp)
-    bottom = torch.sum(bottom, dim=1)
-    loss = torch.sum(-torch.log(top / bottom))
-    return loss
+def matryoshka_level_loss(
+    emb1: torch.Tensor,
+    emb1_diff: torch.Tensor,
+    emb2: torch.Tensor,
+    emb2_diff: torch.Tensor,
+    *,
+    binary_margins: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor:
+    combined = torch.cat(
+        (
+            interleave_rows(emb1, emb1_diff),
+            interleave_rows(emb2, emb2_diff),
+            interleave_rows(emb1, emb2),
+            interleave_rows(emb1_diff, emb2_diff),
+            interleave_rows(emb1, emb2_diff),
+            interleave_rows(emb1_diff, emb2),
+        ),
+        dim=0,
+    )
+
+    batch_size = emb1.size(0)
+    positives = torch.ones(batch_size, device=device)
+    labels = torch.cat(
+        (
+            positives,
+            positives,
+            binary_margins,
+            binary_margins,
+            binary_margins,
+            binary_margins,
+        ),
+        dim=0,
+    )
+
+    pairwise_loss = cosine_loss(labels, combined) + angle_loss(labels, combined)
+    contrastive = contrastive_loss(emb1, emb1_diff, emb2, emb2_diff, device=device)
+    return pairwise_loss + contrastive
 
 
+def forward_batch(model: AutoModel, batch: dict, device: torch.device, config: TrainingConfig) -> torch.Tensor:
+    input_a = batch["text_pair1_token_ids"].to(device)
+    mask_a = batch["text_pair1_attention_mask"].to(device)
+    input_b = batch["text_pair2_token_ids"].to(device)
+    mask_b = batch["text_pair2_attention_mask"].to(device)
+    margins = batch["margins"].to(device)
 
-import torch
+    emb_a, emb_a_diff = encode_with_dropout(model, input_a, mask_a)
+    emb_b, emb_b_diff = encode_with_dropout(model, input_b, mask_b)
 
-def interleave_rows(tensor1, tensor2, embedding_size):
-    # Stack the tensors along a new dimension (results in shape (2, 32, 768))
-    stacked = torch.stack((tensor1, tensor2), dim=0)
-    
-    # Permute to swap the first two dimensions (results in shape (32, 2, 768))
-    permuted = stacked.permute(1, 0, 2)
-    
-    # Reshape to flatten the first two dimensions (results in shape (64, 768))
-    interleaved = permuted.reshape(-1, embedding_size)
-    
-    return interleaved
+    total_loss = torch.tensor(0.0, device=device)
+    for threshold, ratio in config.matryoshka_levels:
+        embedding_dim = max(1, int(config.embedding_size * ratio))
+        views = (
+            F.normalize(emb_a[:, :embedding_dim], p=2, dim=1),
+            F.normalize(emb_a_diff[:, :embedding_dim], p=2, dim=1),
+            F.normalize(emb_b[:, :embedding_dim], p=2, dim=1),
+            F.normalize(emb_b_diff[:, :embedding_dim], p=2, dim=1),
+        )
+        binary_margins = binarize_margins(margins, threshold)
+        level_loss = matryoshka_level_loss(*views, binary_margins=binary_margins, device=device)
+        total_loss += level_loss
 
-
-
-
-import torch
-def calculate_cosine_angle_loss(embeddings_1_data_norm, embeddings_1_diff_data_norm, embeddings_2_data_norm, embeddings_2_diff_data_norm,b_margins, embedding_size):
-    combined_one = interleave_rows(embeddings_1_data_norm,embeddings_1_diff_data_norm,embedding_size)
-    combined_two = interleave_rows(embeddings_2_data_norm,embeddings_2_diff_data_norm,embedding_size)
-    
-    combined_pair = interleave_rows(embeddings_1_data_norm,embeddings_2_data_norm,embedding_size)
-    combined_pair_diff = interleave_rows(embeddings_1_diff_data_norm,embeddings_2_diff_data_norm,embedding_size)
-
-    
-    combined_pair2 = interleave_rows(embeddings_1_data_norm,embeddings_2_diff_data_norm,embedding_size)
-    combined_pair3 = interleave_rows(embeddings_1_diff_data_norm,embeddings_2_data_norm,embedding_size)
-
-    
-    
-    combined_all = torch.cat((combined_one,combined_two,combined_pair,combined_pair_diff,combined_pair2,combined_pair3), dim = 0)
-    total_b_margins = torch.cat((torch.ones(embeddings_1_data_norm.size(0)),torch.ones(embeddings_1_data_norm.size(0)),torch.tensor(b_margins),torch.tensor(b_margins),torch.tensor(b_margins),torch.tensor(b_margins)),dim = 0 )
-    return cosine_loss(total_b_margins.to(device),combined_all)+ angle_loss(total_b_margins.to(device),combined_all)+calculate_loss(embeddings_1_data_norm, embeddings_1_diff_data_norm, embeddings_2_data_norm, embeddings_2_diff_data_norm,b_margins)
+    return total_loss / config.batch_size
 
 
-opt = torch.optim.AdamW(model.parameters(), lr=2e-5)
-
-
-def model_eval(dataloader, model, device):
-    model.eval()  # switch to eval model, will turn off randomness like dropout
+def evaluate(model: AutoModel, dataloader: DataLoader, device: torch.device, config: TrainingConfig) -> float:
+    model.eval()
+    losses: List[float] = []
     with torch.no_grad():
-        total_loss = 0 
-        for batch in tqdm(val_data_dataloader, desc=f'train-{epoch}'):
-            b_ids_1, b_mask_1,b_ids_2, b_mask_2, b_margins = (batch['text_pair1_token_ids'],
-                                   batch['text_pair1_attention_mask'], batch['text_pair2_token_ids'], batch['text_pair2_attention_mask'],batch['margins'])
-    
-            b_ids_1 = b_ids_1.to(device)
-            b_mask_1 = b_mask_1.to(device)
-        
-            
-            b_ids_2 = b_ids_2.to(device)
-            b_mask_2 = b_mask_2.to(device)
-            b_margins = torch.tensor(b_margins)
-            embeddings_1 = model(b_ids_1,b_mask_1)
-            embeddings_1 = mean_pooling(embeddings_1, b_mask_1)
-        
-            embeddings_1_diff = model(b_ids_1,b_mask_1)
-            embeddings_1_diff = mean_pooling(embeddings_1_diff, b_mask_1)
-        
-            embeddings_2 = model(b_ids_2,b_mask_2)
-            embeddings_2 = mean_pooling(embeddings_2, b_mask_2)
-        
-            embeddings_2_diff = model(b_ids_2,b_mask_2)
-            embeddings_2_diff = mean_pooling(embeddings_2_diff, b_mask_2)
-
-            indices_high = (b_margins >= 0.25).nonzero(as_tuple=True)[0]
-            indices_low = (b_margins < 0.25).nonzero(as_tuple=True)[0]
-            b_margins_first = b_margins.clone()
-            b_margins_first[indices_high] = 1#b_margins[indices_high]
-            b_margins_first[indices_low] = 0
-            indices_high = (b_margins >= 0.50).nonzero(as_tuple=True)[0]
-            indices_low = (b_margins < 0.50).nonzero(as_tuple=True)[0]
-            b_margins_second = b_margins.clone()
-            b_margins_second[indices_high] = 1#b_margins[indices_high]
-            b_margins_second[indices_low] = 0
-            indices_high = (b_margins >= 0.75).nonzero(as_tuple=True)[0]
-            indices_low = (b_margins < 0.75).nonzero(as_tuple=True)[0]
-            b_margins_third = b_margins.clone()
-            b_margins_third[indices_high] = 1#b_margins[indices_high]
-            b_margins_third[indices_low] = 0
-
-        
-            ### FIRST EMBEDDING Matryoshka
-            embeddings_1_first = embeddings_1[:, :int(EMBEDDING_SIZE/4)]
-            embeddings_1_diff_first = embeddings_1_diff[:, :int(EMBEDDING_SIZE/4)]
-            embeddings_2_first = embeddings_2[:, :int(EMBEDDING_SIZE/4)]
-            embeddings_2_diff_first = embeddings_2_diff[:, :int(EMBEDDING_SIZE/4)]
-            
-            ## Normalize
-            embeddings_1_norms_first = embeddings_1_first.norm(dim=1, keepdim=True)
-            embeddings_1_data_norm_first = embeddings_1_first / embeddings_1_norms_first
-            embeddings_1_diff_norms_first = embeddings_1_diff_first.norm(dim=1, keepdim=True)
-            embeddings_1_diff_data_norm_first = embeddings_1_diff_first / embeddings_1_diff_norms_first
-            embeddings_2_norms_first = embeddings_2_first.norm(dim=1, keepdim=True)
-            embeddings_2_data_norm_first = embeddings_2_first / embeddings_2_norms_first
-            embeddings_2_diff_norms_first = embeddings_2_diff_first.norm(dim=1, keepdim=True)
-            embeddings_2_diff_data_norm_first = embeddings_2_diff_first / embeddings_2_diff_norms_first
-    
-            ### SECOND EMBEDDING Matryoshka
-            embeddings_1_second = embeddings_1[:, :int(EMBEDDING_SIZE/2)]
-            embeddings_1_diff_second  = embeddings_1_diff[:, :int(EMBEDDING_SIZE/2)]
-            embeddings_2_second  = embeddings_2[:, :int(EMBEDDING_SIZE/2)]
-            embeddings_2_diff_second = embeddings_2_diff[:, :int(EMBEDDING_SIZE/2)]
-            
-            ## Normalize
-            embeddings_1_norms_second = embeddings_1_second.norm(dim=1, keepdim=True)
-            embeddings_1_data_norm_second = embeddings_1_second / embeddings_1_norms_second
-            embeddings_1_diff_norms_second = embeddings_1_diff_second.norm(dim=1, keepdim=True)
-            embeddings_1_diff_data_norm_second = embeddings_1_diff_second / embeddings_1_diff_norms_second
-            embeddings_2_norms_second = embeddings_2_second.norm(dim=1, keepdim=True)
-            embeddings_2_data_norm_second = embeddings_2_second / embeddings_2_norms_second
-            embeddings_2_diff_norms_second = embeddings_2_diff_second.norm(dim=1, keepdim=True)
-            embeddings_2_diff_data_norm_second = embeddings_2_diff_second / embeddings_2_diff_norms_second
-    
-    
-            ### THIRD EMBEDDING Matryoshka
-            embeddings_1_third = embeddings_1[:, :int(EMBEDDING_SIZE/1)]
-            embeddings_1_diff_third  = embeddings_1_diff[:, :int(EMBEDDING_SIZE/1)]
-            embeddings_2_third  = embeddings_2[:, :int(EMBEDDING_SIZE/1)]
-            embeddings_2_diff_third = embeddings_2_diff[:, :int(EMBEDDING_SIZE/1)]
-            
-            ## Normalize
-            embeddings_1_norms_third = embeddings_1_third.norm(dim=1, keepdim=True)
-            embeddings_1_data_norm_third = embeddings_1_third / embeddings_1_norms_third
-            embeddings_1_diff_norms_third = embeddings_1_diff_third.norm(dim=1, keepdim=True)
-            embeddings_1_diff_data_norm_third = embeddings_1_diff_third / embeddings_1_diff_norms_third
-            embeddings_2_norms_third = embeddings_2_third.norm(dim=1, keepdim=True)
-            embeddings_2_data_norm_third = embeddings_2_third / embeddings_2_norms_third
-            embeddings_2_diff_norms_third = embeddings_2_diff_third.norm(dim=1, keepdim=True)
-            embeddings_2_diff_data_norm_third = embeddings_2_diff_third / embeddings_2_diff_norms_third
-    
-    
-            loss = calculate_cosine_angle_loss(embeddings_1_data_norm_first, embeddings_1_diff_data_norm_first, embeddings_2_data_norm_first, embeddings_2_diff_data_norm_first,b_margins_first,int(EMBEDDING_SIZE/4))/BATCH_SIZE
-            loss += calculate_cosine_angle_loss(embeddings_1_data_norm_second, embeddings_1_diff_data_norm_second, embeddings_2_data_norm_second, embeddings_2_diff_data_norm_second,b_margins_second,int(EMBEDDING_SIZE/2))/BATCH_SIZE
-            loss += calculate_cosine_angle_loss(embeddings_1_data_norm_third, embeddings_1_diff_data_norm_third, embeddings_2_data_norm_third, embeddings_2_diff_data_norm_third,b_margins_third,int(EMBEDDING_SIZE/1))/BATCH_SIZE
-            #loss += calculate_cosine_angle_loss(embeddings_1_data_norm_fourth, embeddings_1_diff_data_norm_fourth, embeddings_2_data_norm_fourth, embeddings_2_diff_data_norm_fourth,b_margins_fourth,int(EMBEDDING_SIZE))/BATCH_SIZE
-            total_loss+=float(loss.item())
-    
-        return total_loss # f1, #prec, recall, report, y_pred, y_true
+        for batch in tqdm(dataloader, desc="eval", leave=False):
+            batch_loss = forward_batch(model, batch, device, config)
+            losses.append(batch_loss.item())
+    return float(sum(losses) / len(losses)) if losses else 0.0
 
 
-# In[31]:
+def save_checkpoint(
+    model: AutoModel,
+    optimizer: torch.optim.Optimizer,
+    epoch: int,
+    global_step: int,
+    output_dir: Path,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    model_path = output_dir / f"model-epoch{epoch}-step{global_step}.pt"
+    optimizer_path = output_dir / f"optimizer-epoch{epoch}-step{global_step}.pt"
+    torch.save(model.state_dict(), model_path)
+    torch.save({"epoch": epoch, "global_step": global_step, "optimizer_state_dict": optimizer.state_dict()}, optimizer_path)
+    logging.info("Saved checkpoint to %s", model_path)
 
 
-import os
-if not os.path.isdir('/mnt/projects/controversyworld/Matryoshka/multilingual-matryoshka-e5-calculate_cosine_angle_loss-fixed-regular-20250205'):
-    os.mkdir('/mnt/projects/controversyworld/Matryoshka/multilingual-matryoshka-e5-calculate_cosine_angle_loss-fixed-regular-20250205')
-epoch = 0 
+def train(config: TrainingConfig) -> None:
+    setup_logging()
+    logging.info("Configuration: %s", config)
 
-          
-opt = torch.optim.AdamW(model.parameters(), lr=2e-5)
+    train_records = load_jsonl(config.train_path)
+    val_records = load_jsonl(config.val_path)
 
+    device = get_device()
 
-minimum_loss = 999999999999999
-for epoch in range(0,5):
-    num_batches = 0 
+    tokenizer = AutoTokenizer.from_pretrained(config.resolved_tokenizer(), cache_dir=config.cache_dir, use_fast=False)
+    model = AutoModel.from_pretrained(config.model_name, cache_dir=config.cache_dir)
+    model.to(device)
 
-        
-    model = model.train()
-    for batch in tqdm(train_data_dataloader, desc=f'train-{epoch}'):
-        #model = model.train()
-        b_ids_1, b_mask_1,b_ids_2, b_mask_2, b_margins = (batch['text_pair1_token_ids'],
-                                   batch['text_pair1_attention_mask'], batch['text_pair2_token_ids'], batch['text_pair2_attention_mask'],batch['margins'])
-        opt.zero_grad()
-        #print(batch)
-        b_ids_1 = b_ids_1.to(device)
-        b_mask_1 = b_mask_1.to(device)
-    
-        
-        b_ids_2 = b_ids_2.to(device)
-        b_mask_2 = b_mask_2.to(device)
-        b_margins = torch.tensor(b_margins)
-        embeddings_1 = model(b_ids_1,b_mask_1)
-        embeddings_1 = mean_pooling(embeddings_1, b_mask_1)
-    
-        embeddings_1_diff = model(b_ids_1,b_mask_1)
-        embeddings_1_diff = mean_pooling(embeddings_1_diff, b_mask_1)
-    
-        embeddings_2 = model(b_ids_2,b_mask_2)
-        embeddings_2 = mean_pooling(embeddings_2, b_mask_2)
-    
-        embeddings_2_diff = model(b_ids_2,b_mask_2)
-        embeddings_2_diff = mean_pooling(embeddings_2_diff, b_mask_2)
+    train_dataset = EmbeddingDataset(train_records, tokenizer)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config.batch_size,
+        shuffle=True,
+        collate_fn=train_dataset.collate_fn,
+    )
 
-        indices_high = (b_margins >= 0.25).nonzero(as_tuple=True)[0]
-        indices_low = (b_margins < 0.25).nonzero(as_tuple=True)[0]
-        b_margins_first = b_margins.clone()
-        b_margins_first[indices_high] = 1#b_margins[indices_high]
-        b_margins_first[indices_low] = 0
-        indices_high = (b_margins >= 0.50).nonzero(as_tuple=True)[0]
-        indices_low = (b_margins < 0.50).nonzero(as_tuple=True)[0]
-        b_margins_second = b_margins.clone()
-        b_margins_second[indices_high] = 1#b_margins[indices_high]
-        b_margins_second[indices_low] = 0
-        indices_high = (b_margins >= 0.75).nonzero(as_tuple=True)[0]
-        indices_low = (b_margins < 0.75).nonzero(as_tuple=True)[0]
-        b_margins_third = b_margins.clone()
-        b_margins_third[indices_high] = 1#b_margins[indices_high]
-        b_margins_third[indices_low] = 0
+    val_loader: Optional[DataLoader] = None
+    if val_records:
+        val_dataset = EmbeddingDataset(val_records, tokenizer)
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=config.batch_size,
+            shuffle=False,
+            collate_fn=val_dataset.collate_fn,
+        )
 
-    
-        ### FIRST EMBEDDING Matryoshka
-        embeddings_1_first = embeddings_1[:, :int(EMBEDDING_SIZE/4)]
-        embeddings_1_diff_first = embeddings_1_diff[:, :int(EMBEDDING_SIZE/4)]
-        embeddings_2_first = embeddings_2[:, :int(EMBEDDING_SIZE/4)]
-        embeddings_2_diff_first = embeddings_2_diff[:, :int(EMBEDDING_SIZE/4)]
-        
-        ## Normalize
-        embeddings_1_norms_first = embeddings_1_first.norm(dim=1, keepdim=True)
-        embeddings_1_data_norm_first = embeddings_1_first / embeddings_1_norms_first
-        embeddings_1_diff_norms_first = embeddings_1_diff_first.norm(dim=1, keepdim=True)
-        embeddings_1_diff_data_norm_first = embeddings_1_diff_first / embeddings_1_diff_norms_first
-        embeddings_2_norms_first = embeddings_2_first.norm(dim=1, keepdim=True)
-        embeddings_2_data_norm_first = embeddings_2_first / embeddings_2_norms_first
-        embeddings_2_diff_norms_first = embeddings_2_diff_first.norm(dim=1, keepdim=True)
-        embeddings_2_diff_data_norm_first = embeddings_2_diff_first / embeddings_2_diff_norms_first
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
 
-        ### SECOND EMBEDDING Matryoshka
-        embeddings_1_second = embeddings_1[:, :int(EMBEDDING_SIZE/2)]
-        embeddings_1_diff_second  = embeddings_1_diff[:, :int(EMBEDDING_SIZE/2)]
-        embeddings_2_second  = embeddings_2[:, :int(EMBEDDING_SIZE/2)]
-        embeddings_2_diff_second = embeddings_2_diff[:, :int(EMBEDDING_SIZE/2)]
-        
-        ## Normalize
-        embeddings_1_norms_second = embeddings_1_second.norm(dim=1, keepdim=True)
-        embeddings_1_data_norm_second = embeddings_1_second / embeddings_1_norms_second
-        embeddings_1_diff_norms_second = embeddings_1_diff_second.norm(dim=1, keepdim=True)
-        embeddings_1_diff_data_norm_second = embeddings_1_diff_second / embeddings_1_diff_norms_second
-        embeddings_2_norms_second = embeddings_2_second.norm(dim=1, keepdim=True)
-        embeddings_2_data_norm_second = embeddings_2_second / embeddings_2_norms_second
-        embeddings_2_diff_norms_second = embeddings_2_diff_second.norm(dim=1, keepdim=True)
-        embeddings_2_diff_data_norm_second = embeddings_2_diff_second / embeddings_2_diff_norms_second
+    best_val_loss = float("inf")
+    global_step = 0
+
+    for epoch in range(config.epochs):
+        model.train()
+        running_loss = 0.0
+        progress = tqdm(train_loader, desc=f"train-{epoch}")
+
+        for batch in progress:
+            optimizer.zero_grad()
+            batch_loss = forward_batch(model, batch, device, config)
+            batch_loss.backward()
+            optimizer.step()
+
+            global_step += 1
+            running_loss += batch_loss.item()
+            progress.set_postfix({"loss": batch_loss.item()})
+
+            if (
+                val_loader is not None
+                and config.validation_interval > 0
+                and global_step % config.validation_interval == 0
+            ):
+                val_loss = evaluate(model, val_loader, device, config)
+                logging.info("Step %s | validation loss: %.5f", global_step, val_loss)
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    save_checkpoint(model, optimizer, epoch, global_step, config.output_dir)
+                model.train()
+
+        epoch_loss = running_loss / max(1, len(train_loader))
+        logging.info("Epoch %s | training loss: %.5f", epoch, epoch_loss)
+
+        if val_loader is not None:
+            val_loss = evaluate(model, val_loader, device, config)
+            logging.info("Epoch %s | validation loss: %.5f", epoch, val_loss)
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                save_checkpoint(model, optimizer, epoch, global_step, config.output_dir)
+
+    logging.info("Training complete. Best validation loss: %.5f", best_val_loss)
 
 
-        ### THIRD EMBEDDING Matryoshka
-        embeddings_1_third = embeddings_1[:, :int(EMBEDDING_SIZE/1)]
-        embeddings_1_diff_third  = embeddings_1_diff[:, :int(EMBEDDING_SIZE/1)]
-        embeddings_2_third  = embeddings_2[:, :int(EMBEDDING_SIZE/1)]
-        embeddings_2_diff_third = embeddings_2_diff[:, :int(EMBEDDING_SIZE/1)]
-        
-        ## Normalize
-        embeddings_1_norms_third = embeddings_1_third.norm(dim=1, keepdim=True)
-        embeddings_1_data_norm_third = embeddings_1_third / embeddings_1_norms_third
-        embeddings_1_diff_norms_third = embeddings_1_diff_third.norm(dim=1, keepdim=True)
-        embeddings_1_diff_data_norm_third = embeddings_1_diff_third / embeddings_1_diff_norms_third
-        embeddings_2_norms_third = embeddings_2_third.norm(dim=1, keepdim=True)
-        embeddings_2_data_norm_third = embeddings_2_third / embeddings_2_norms_third
-        embeddings_2_diff_norms_third = embeddings_2_diff_third.norm(dim=1, keepdim=True)
-        embeddings_2_diff_data_norm_third = embeddings_2_diff_third / embeddings_2_diff_norms_third
-
-
-       
-        loss = calculate_cosine_angle_loss(embeddings_1_data_norm_first, embeddings_1_diff_data_norm_first, embeddings_2_data_norm_first, embeddings_2_diff_data_norm_first,b_margins_first,int(EMBEDDING_SIZE/4))/BATCH_SIZE
-        loss += calculate_cosine_angle_loss(embeddings_1_data_norm_second, embeddings_1_diff_data_norm_second, embeddings_2_data_norm_second, embeddings_2_diff_data_norm_second,b_margins_second,int(EMBEDDING_SIZE/2))/BATCH_SIZE
-        loss += calculate_cosine_angle_loss(embeddings_1_data_norm_third, embeddings_1_diff_data_norm_third, embeddings_2_data_norm_third, embeddings_2_diff_data_norm_third,b_margins_third,int(EMBEDDING_SIZE/1))/BATCH_SIZE
-        
-        
-        
-
-        loss.backward()
-        opt.step()
-        num_batches+=1
-        if num_batches %10000 ==0:
-            validation_loss = model_eval(val_data_dataloader,model, device) 
-            if validation_loss < minimum_loss:
-                try:
-                    torch.save(model.state_dict(), '/mnt/projects/controversyworld/Matryoshka/multilingual-matryoshka-e5-calculate_cosine_angle_loss-fixed-regular-20250205/multilingual-20250205-matryoshka-e5-calculate_cosine_angle_loss-base'+str(epoch)+'-'+str(num_batches)+'.pt')
-                    torch.save({
-                    'epoch': epoch,
-                    'num_batches': num_batches,
-                    'optimizer_state_dict': opt.state_dict(),
-                    }, '/mnt/projects/controversyworld/Matryoshka/multilingual-matryoshka-e5-calculate_cosine_angle_loss-fixed-regular-20250205/opt-state'+str(epoch)+'-'+str(num_batches))
-                except Exception as e:
-                    print(e)
-                minium_loss = validation_loss
-                model = model.train()
-            model = model.train()
-        
-    
-
-
-
-
-
+if __name__ == "__main__":
+    train(parse_args())
