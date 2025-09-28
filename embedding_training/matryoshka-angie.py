@@ -1,180 +1,29 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
-
-
+# Import necessary libraries
 import pandas as pd
 import torch
 import numpy as np
 import json
-# Generate a random vector of size 768
 import csv
-
-import torch
-from torch.utils.data import Dataset
-from transformers import AutoTokenizer, AutoModel
-import torch
-import torch.nn.functional as F
-from transformers import BertTokenizer, BertModel
+from torch.utils.data import Dataset, DataLoader, Sampler
+from transformers import AutoTokenizer, AutoModel, BertTokenizer, BertModel
 from torch import optim
 from datasets import load_dataset
-import json
 import re
-from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
+import random
+import gc
+from collections import defaultdict
 
+# Set device to GPU if available
+torch.cuda.is_available()
+device = torch.cuda.current_device()
+torch.cuda.empty_cache()  # Clear GPU cache
+gc.collect()  # Garbage collection to free memory
 
-# In[2]:
-
-
+# Constants
 BATCH_SIZE = 16
-EMBEDDING_SIZE= 768
+EMBEDDING_SIZE = 768
 
-
-
-train_dataset = []
-train_lines_to_remove = []
-f = open('/mnt/projects/qanon_proj/Matryoshka/all_processed_datasets_w_entities_replaced-20241125.jsonl','r')
-ind = 0 
-for line in f:
-    try:
-        train_dataset.append(json.loads(line))
-
-    except Exception as e:
-        print(e)
-    if ind %100000 ==0:
-        print(ind)
-    ind+=1
-f.close()
-
-val_dataset = []
-f = open('/mnt/projects/qanon_proj/Matryoshka/validation_multilingual_final-20241008.jsonl','r')
-ind = 0 
-val_lines_to_remove = []
-
-for line in f:
-    try:
-        val_dataset.append(json.loads(line))
-        
-    except Exception as e:
-        print(e)
-    if ind %100000 ==0:
-        print(ind)
-    ind+=1
-    
-f.close()
-
-
-
-'''         
-def remove_items_at_indices(lst, indices):
-    indices_set = set(indices)
-    lst[:] = [item for idx, item in enumerate(lst) if idx not in indices_set]
-    return lst
-
-train_labels = remove_items_at_indices(train_labels,train_lines_to_remove)
-
-val_labels = remove_items_at_indices(val_labels,val_lines_to_remove)
-'''     
-
-from torch.utils.data import Dataset, DataLoader, Sampler
-from collections import defaultdict
-import random
-import torch
-from collections import defaultdict
-import random
-from torch.utils.data import Sampler
-
-from collections import defaultdict
-import random
-from torch.utils.data import Sampler
-
-class NonRepeatingBatchSampler(Sampler):
-    def __init__(self, labels, batch_size):
-        self.labels = labels
-        self.batch_size = batch_size
-        self.index_to_labels = defaultdict(list)
-
-        # Organize labels
-        for idx, label in enumerate(labels):
-            if isinstance(label, (tuple, list)) and len(label) >= 2:
-                self.index_to_labels[idx].extend(label[:2])  # Store the first two labels
-            else:
-                raise ValueError("Expected each label to have at least two elements.")
-        
-        self.batches = self._create_batches()
-
-    def _create_batches(self):
-        batches = []
-        label_indices = list(self.index_to_labels.keys())
-        random.shuffle(label_indices)
-
-        current_batch = []
-        current_labels = set()
-        leftovers = []
-
-        for idx in label_indices:
-            labels = self.index_to_labels[idx]
-
-            # Check if adding this index will repeat any label
-            if labels[0] not in current_labels and labels[1] not in current_labels:
-                current_batch.append(idx)
-                current_labels.update(labels)
-
-                # If we've reached the desired batch size, store the batch
-                if len(current_batch) == self.batch_size:
-                    batches.append(current_batch)
-                    current_batch = []
-                    current_labels = set()
-            else:
-                # If it can't be added to the current batch, add to leftovers
-                leftovers.append(idx)
-
-        # Try to use leftovers to create additional batches
-        max_attempts = len(leftovers)  # To avoid infinite loop if no valid batches can be formed
-        attempts = 0
-        while leftovers and attempts < max_attempts:
-            idx = leftovers.pop(0)
-            labels = self.index_to_labels[idx]
-
-            # Try to add leftover indices to the current batch if possible
-            if labels[0] not in current_labels and labels[1] not in current_labels:
-                current_batch.append(idx)
-                current_labels.update(labels)
-            else:
-                # If it still can't be added, put it back to the end of leftovers
-                leftovers.append(idx)
-
-            # If we've reached the desired batch size, store the batch
-            if len(current_batch) == self.batch_size:
-                batches.append(current_batch)
-                current_batch = []
-                current_labels = set()
-            
-            attempts += 1
-
-        # Handle any remaining items that couldn't form a full batch
-        if current_batch:
-            batches.append(current_batch)
-
-        return batches
-
-    def __iter__(self):
-        random.shuffle(self.batches)
-        for batch in self.batches:
-            yield batch
-
-    def __len__(self):
-        return len(self.batches)
-# In[15]:
-
-
-#train_sampler = NonRepeatingBatchSampler(train_labels, BATCH_SIZE)
-#val_sampler = NonRepeatingBatchSampler(val_labels, BATCH_SIZE)
-
-
-# In[16]:
 
 
 class EmbeddingDataset(Dataset):
@@ -221,20 +70,7 @@ class EmbeddingDataset(Dataset):
         return batched_data
 
 
-# In[17]:
 
-
-import random
-from transformers import AutoModel, AutoTokenizer
-class Object(object):
-    pass
-args = Object()
-model_name ='intfloat/multilingual-e5-base'#'intfloat/e5-base-v2'#'intfloat/multilingual-e5-base' #'microsoft/mdeberta-v3-base'#'google/umt5-base'
-args.tokenizer ='intfloat/multilingual-e5-base'#'intfloat/e5-base-v2'#intfloat/multilingual-e5-base'#microsoft/mdeberta-v3-base'# 'google/umt5-base'
-#random.shuffle(dataset)
-
-
-# In[18]:
 
 
 train_data = EmbeddingDataset(train_dataset, args)
@@ -387,133 +223,6 @@ def calculate_loss(embeddings_1_data_norm, embeddings_1_diff_data_norm, embeddin
     return loss
 
 
-def mse_class_loss(embeddings_1, embeddings_2, labels):
-    """
-    Computes the Mean Squared Error (MSE) loss between pairs of embeddings 
-    that have a label of 1.
-
-    Args:
-        embeddings_1 (torch.Tensor): A tensor of shape [batch_size, embedding_dim] 
-                                     representing the first set of embeddings.
-        embeddings_2 (torch.Tensor): A tensor of shape [batch_size, embedding_dim] 
-                                     representing the second set of embeddings.
-        labels (torch.Tensor): A tensor of shape [batch_size] containing binary labels 
-                               (0 or 1) where 1 indicates that the corresponding pair 
-                               of embeddings should be similar.
-
-    Returns:
-        torch.Tensor: The MSE loss computed only over the pairs with label 1.
-                      If no pairs have label 1, returns a tensor with value 0.
-    """
-    # Create a mask for the pairs with label 1
-    positive_mask = (labels == 1)
-    
-    # If there are no positive pairs, return zero loss
-    if positive_mask.sum() == 0:
-        return torch.tensor(0.0, device=embeddings_1.device)
-    
-    # Compute the MSE loss only for the positive pairs
-    loss = F.mse_loss(embeddings_1[positive_mask], embeddings_2[positive_mask])
-    return loss
-
-
-
-
-
-'''
-import torch
-def calculate_loss(embeddings_1_data_norm, embeddings_1_diff_data_norm, embeddings_2_data_norm, embeddings_2_diff_data_norm,b_margins):
-    temp =0.05
-    data_full = torch.cat((embeddings_1_data_norm, embeddings_2_diff_data_norm), dim=0)
- 
-    data_full_diff = torch.cat((embeddings_1_diff_data_norm, embeddings_2_data_norm), dim=0)
-    
-    cosine_matrix1 = torch.mm(data_full, data_full_diff.t())
-    indices = torch.arange(data_full.size(0))
-    mask = torch.zeros(cosine_matrix1.size(), dtype=torch.bool)
-    mask[indices, indices] = True
-    new_weight = torch.zeros(cosine_matrix1.size(), dtype=torch.float)
-    indices = torch.arange(embeddings_1_data_norm.size(0))
-    new_weight[indices, indices] = 1
-    new_weight = torch.exp(new_weight)/torch.sum(torch.exp(new_weight),dim = 1)
-    new_weight = torch.sum(new_weight, dim = 1)
-    
-    top= torch.exp(cosine_matrix1/temp)*mask.to(device)
-    top = torch.sum(top,dim =1)
-    bottom = torch.exp(cosine_matrix1/temp)
-    bottom = torch.sum(bottom,dim = 1)
-    loss = torch.sum(-torch.log(top/bottom))
-    #print(loss)
-    cosine_matrix2 = torch.mm(embeddings_2_data_norm, embeddings_2_diff_data_norm.t())
-    indices = torch.arange(embeddings_1_data_norm.size(0))
-    mask = torch.zeros(cosine_matrix2.size(), dtype=torch.bool)
-    mask[indices, indices] = True
-    mask[indices, indices] = True
-    top= torch.exp(cosine_matrix2/temp)*mask.to(device)
-    top = torch.sum(top,dim =1)
-    bottom = torch.exp(cosine_matrix2/temp)
-    bottom = torch.sum(bottom,dim = 1)
-    loss+= torch.sum(-torch.log(top/bottom))
-    #print(loss)
-    
-    
-    
-    cosine_matrix3 = torch.mm(embeddings_1_data_norm, embeddings_2_data_norm.t())
-    indices = torch.arange(embeddings_1_data_norm.size(0))
-    mask = torch.zeros(cosine_matrix3.size(), dtype=torch.bool)
-    mask[indices, indices] = True
-    mask[indices, indices] = True
-    
-    top= torch.exp(cosine_matrix3/temp)*mask.to(device)
-    top = torch.sum(top,dim =1)
-    bottom = torch.exp(cosine_matrix3/temp)
-    bottom = torch.sum(bottom,dim = 1)
-    loss+=  torch.sum(-torch.log(top/bottom))
-    
-    
-    cosine_matrix4 = torch.mm(embeddings_1_data_norm, embeddings_2_diff_data_norm.t())
-    indices = torch.arange(embeddings_1_data_norm.size(0))
-    mask = torch.zeros(cosine_matrix4.size(), dtype=torch.bool)
-    mask[indices, indices] = True
-    mask[indices, indices] = True
-    
-    top= torch.exp(cosine_matrix4/temp)*mask.to(device)
-    top = torch.sum(top,dim =1)
-    bottom = torch.exp(cosine_matrix4/temp)
-    bottom = torch.sum(bottom,dim = 1)
-    loss+= torch.sum(-torch.log(top/bottom))
-    
-    
-    cosine_matrix5 = torch.mm(embeddings_1_diff_data_norm, embeddings_2_diff_data_norm.t())
-    indices = torch.arange(embeddings_1_data_norm.size(0))
-    mask = torch.zeros(cosine_matrix5.size(), dtype=torch.bool)
-    mask[indices, indices] = True
-    mask[indices, indices] = True
-
-    
-    top= torch.exp(cosine_matrix5/temp)*mask.to(device)
-    top = torch.sum(top,dim =1)
-    bottom = torch.exp(cosine_matrix5/temp)
-    bottom = torch.sum(bottom,dim = 1)
-    loss+=  torch.sum(-torch.log(top/bottom))
-    
-    
-    cosine_matrix6 = torch.mm(embeddings_1_diff_data_norm, embeddings_2_data_norm.t())
-    indices = torch.arange(embeddings_1_data_norm.size(0))
-    mask = torch.zeros(cosine_matrix6.size(), dtype=torch.bool)
-    mask[indices, indices] = True
-    mask[indices, indices] = True
-
-    top= torch.exp(cosine_matrix6/temp)*mask.to(device)
-    top = torch.sum(top,dim =1)
-    bottom = torch.exp(cosine_matrix6/temp)
-    bottom = torch.sum(bottom,dim = 1)
-    loss+=  torch.sum(-torch.log(top/bottom))
-    return loss
-'''
-
-# In[26]:
-
 
 import torch
 
@@ -550,17 +259,8 @@ def calculate_cosine_angle_loss(embeddings_1_data_norm, embeddings_1_diff_data_n
     total_b_margins = torch.cat((torch.ones(embeddings_1_data_norm.size(0)),torch.ones(embeddings_1_data_norm.size(0)),torch.tensor(b_margins),torch.tensor(b_margins),torch.tensor(b_margins),torch.tensor(b_margins)),dim = 0 )
     return cosine_loss(total_b_margins.to(device),combined_all)+ angle_loss(total_b_margins.to(device),combined_all)+calculate_loss(embeddings_1_data_norm, embeddings_1_diff_data_norm, embeddings_2_data_norm, embeddings_2_diff_data_norm,b_margins)
 
-# In[28]:
-
 
 opt = torch.optim.AdamW(model.parameters(), lr=2e-5)
-
-
-# In[29]:
-
-
-
-# In[30]:
 
 
 def model_eval(dataloader, model, device):
@@ -605,11 +305,7 @@ def model_eval(dataloader, model, device):
             b_margins_third = b_margins.clone()
             b_margins_third[indices_high] = 1#b_margins[indices_high]
             b_margins_third[indices_low] = 0
-            #indices_high = (b_margins >= 1.0).nonzero(as_tuple=True)[0]
-            #indices_low = (b_margins < 1.0).nonzero(as_tuple=True)[0]
-            #b_margins_fourth= b_margins.clone()
-            #b_margins_fourth[indices_high] = 1
-            #b_margins_fourth[indices_low] = 0
+
         
             ### FIRST EMBEDDING Matryoshka
             embeddings_1_first = embeddings_1[:, :int(EMBEDDING_SIZE/4)]
@@ -661,24 +357,6 @@ def model_eval(dataloader, model, device):
             embeddings_2_diff_data_norm_third = embeddings_2_diff_third / embeddings_2_diff_norms_third
     
     
-            ### FOURTH EMBEDDING Matryoshka
-            '''
-            embeddings_1_fourth = embeddings_1[:, :EMBEDDING_SIZE]
-            embeddings_1_diff_fourth  = embeddings_1_diff[:, :EMBEDDING_SIZE]
-            embeddings_2_fourth  = embeddings_2[:, :EMBEDDING_SIZE]
-            embeddings_2_diff_fourth = embeddings_2_diff[:, :EMBEDDING_SIZE]
-            
-            ## Normalize
-            embeddings_1_norms_fourth = embeddings_1_fourth.norm(dim=1, keepdim=True)
-            embeddings_1_data_norm_fourth = embeddings_1_fourth / embeddings_1_norms_fourth
-            embeddings_1_diff_norms_fourth = embeddings_1_diff_fourth.norm(dim=1, keepdim=True)
-            embeddings_1_diff_data_norm_fourth = embeddings_1_diff_fourth / embeddings_1_diff_norms_fourth
-            embeddings_2_norms_fourth = embeddings_2_fourth.norm(dim=1, keepdim=True)
-            embeddings_2_data_norm_fourth = embeddings_2_fourth / embeddings_2_norms_fourth
-            embeddings_2_diff_norms_fourth = embeddings_2_diff_fourth.norm(dim=1, keepdim=True)
-            embeddings_2_diff_data_norm_fourth = embeddings_2_diff_fourth / embeddings_2_diff_norms_fourth
-            '''
-    
             loss = calculate_cosine_angle_loss(embeddings_1_data_norm_first, embeddings_1_diff_data_norm_first, embeddings_2_data_norm_first, embeddings_2_diff_data_norm_first,b_margins_first,int(EMBEDDING_SIZE/4))/BATCH_SIZE
             loss += calculate_cosine_angle_loss(embeddings_1_data_norm_second, embeddings_1_diff_data_norm_second, embeddings_2_data_norm_second, embeddings_2_diff_data_norm_second,b_margins_second,int(EMBEDDING_SIZE/2))/BATCH_SIZE
             loss += calculate_cosine_angle_loss(embeddings_1_data_norm_third, embeddings_1_diff_data_norm_third, embeddings_2_data_norm_third, embeddings_2_diff_data_norm_third,b_margins_third,int(EMBEDDING_SIZE/1))/BATCH_SIZE
@@ -696,19 +374,14 @@ if not os.path.isdir('/mnt/projects/controversyworld/Matryoshka/multilingual-mat
     os.mkdir('/mnt/projects/controversyworld/Matryoshka/multilingual-matryoshka-e5-calculate_cosine_angle_loss-fixed-regular-20250205')
 epoch = 0 
 
-#model.load_state_dict(torch.load('multilingual-matryoshka-e5-calculate_cosine_angle_loss-fixed-regular-20250205/'+'multilingual-20250205-matryoshka-e5-calculate_cosine_angle_loss-base0-160000.pt'),strict=False)
-#checkpoint = torch.load('/mnt/projects/qanon_proj/Matryoshka/multilingual-matryoshka-e5-calculate_cosine_angle_loss-fixed-regular-20250205/opt-state0-160000') 
-
           
 opt = torch.optim.AdamW(model.parameters(), lr=2e-5)
-#opt.load_state_dict(checkpoint['optimizer_state_dict'])
 
 
 minimum_loss = 999999999999999
-for epoch in range(0,1000000):
+for epoch in range(0,5):
     num_batches = 0 
-    #if epoch == 0:
-    #    num_batches = 160000
+
         
     model = model.train()
     for batch in tqdm(train_data_dataloader, desc=f'train-{epoch}'):
@@ -751,11 +424,7 @@ for epoch in range(0,1000000):
         b_margins_third = b_margins.clone()
         b_margins_third[indices_high] = 1#b_margins[indices_high]
         b_margins_third[indices_low] = 0
-        #indices_high = (b_margins >= 1.0).nonzero(as_tuple=True)[0]
-        #indices_low = (b_margins < 1.0).nonzero(as_tuple=True)[0]
-        #b_margins_fourth= b_margins.clone()
-        #b_margins_fourth[indices_high] = 1
-        #b_margins_fourth[indices_low] = 0
+
     
         ### FIRST EMBEDDING Matryoshka
         embeddings_1_first = embeddings_1[:, :int(EMBEDDING_SIZE/4)]
@@ -807,28 +476,10 @@ for epoch in range(0,1000000):
         embeddings_2_diff_data_norm_third = embeddings_2_diff_third / embeddings_2_diff_norms_third
 
 
-        ### FOURTH EMBEDDING Matryoshka
-        '''
-        embeddings_1_fourth = embeddings_1[:, :EMBEDDING_SIZE]
-        embeddings_1_diff_fourth  = embeddings_1_diff[:, :EMBEDDING_SIZE]
-        embeddings_2_fourth  = embeddings_2[:, :EMBEDDING_SIZE]
-        embeddings_2_diff_fourth = embeddings_2_diff[:, :EMBEDDING_SIZE]
-        
-        ## Normalize
-        embeddings_1_norms_fourth = embeddings_1_fourth.norm(dim=1, keepdim=True)
-        embeddings_1_data_norm_fourth = embeddings_1_fourth / embeddings_1_norms_fourth
-        embeddings_1_diff_norms_fourth = embeddings_1_diff_fourth.norm(dim=1, keepdim=True)
-        embeddings_1_diff_data_norm_fourth = embeddings_1_diff_fourth / embeddings_1_diff_norms_fourth
-        embeddings_2_norms_fourth = embeddings_2_fourth.norm(dim=1, keepdim=True)
-        embeddings_2_data_norm_fourth = embeddings_2_fourth / embeddings_2_norms_fourth
-        embeddings_2_diff_norms_fourth = embeddings_2_diff_fourth.norm(dim=1, keepdim=True)
-        embeddings_2_diff_data_norm_fourth = embeddings_2_diff_fourth / embeddings_2_diff_norms_fourth
-        '''
-
+       
         loss = calculate_cosine_angle_loss(embeddings_1_data_norm_first, embeddings_1_diff_data_norm_first, embeddings_2_data_norm_first, embeddings_2_diff_data_norm_first,b_margins_first,int(EMBEDDING_SIZE/4))/BATCH_SIZE
         loss += calculate_cosine_angle_loss(embeddings_1_data_norm_second, embeddings_1_diff_data_norm_second, embeddings_2_data_norm_second, embeddings_2_diff_data_norm_second,b_margins_second,int(EMBEDDING_SIZE/2))/BATCH_SIZE
         loss += calculate_cosine_angle_loss(embeddings_1_data_norm_third, embeddings_1_diff_data_norm_third, embeddings_2_data_norm_third, embeddings_2_diff_data_norm_third,b_margins_third,int(EMBEDDING_SIZE/1))/BATCH_SIZE
-        #loss += calculate_cosine_angle_loss(embeddings_1_data_norm_fourth, embeddings_1_diff_data_norm_fourth, embeddings_2_data_norm_fourth, embeddings_2_diff_data_norm_fourth,b_margins_fourth,int(EMBEDDING_SIZE))/BATCH_SIZE
         
         
         
@@ -851,20 +502,8 @@ for epoch in range(0,1000000):
                 minium_loss = validation_loss
                 model = model.train()
             model = model.train()
-        #if num_batches % 250 ==0:
         
-        try:
-            f = open('/mnt/projects/controversyworld/Matryoshka/multilingual-matryoshka-e5-calculate_cosine_angle_loss-scne-loss-train_loss-fixed-20250205.txt','a+')
-            f.write(str(loss.item())+"\n")
-            f.close()
-        except Exception as e:
-            print(e)
-        print(loss.item())
-    print('HERE')
-    try:
-        torch.save(model.state_dict(), '/mnt/projects/controversyworld/Matryoshka/multilingual-matryoshka-e5-calculate_cosine_angle_loss-fixed-regular-20250205/multilingual-20250205-matryoshka-e5-base'+str(epoch)+'.pt')
-    except Exception as e:
-        print(e)
+    
 
 
 
