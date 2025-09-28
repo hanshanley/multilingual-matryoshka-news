@@ -4,7 +4,7 @@ Two executable scripts train multilingual encoders that respect Matryoshka- and 
 
 ## Data Requirements
 
-1. **Pairwise JSONL corpora** – Each line is a JSON array with five entries: `[url1, text1, url2, text2, similarity_score]`. The texts are fed to the encoder, and the `similarity_score` (e.g., SemEval 2022 Task 8 margins) guides loss weighting.
+1. **Pairwise JSONL corpora** – Each line is a JSON array with five entries: `[url1, text1, url2, text2, similarity_score]`. The texts are fed to the encoder, and the `similarity_score` (e.g., SemEval 2022 Task 8 margins) guides loss weighting. NOTE: the zenodo file containing Jsonl currently has a VERY SIMILAR to VERY DISSIMILAR as the scores for clarity. These need to be changed to being 0.75 to 0 in intervals of 0.25 for you to run these files as is.
 2. **Similarity label map** – A JSON dictionary (default `data/labels_semeval_2022_task_eight.json`) that maps each URL to a nested `{other_url: score}` object. Edges with scores ≥ `similarity_threshold` are treated as positive links when forming connected components.
 
 Any URL missing from the label map is treated as its own singleton component, so it will not be considered a positive neighbour.
@@ -12,13 +12,13 @@ Any URL missing from the label map is treated as its own singleton component, so
 ## Scripts
 
 ### `matryoshka-angie.py`
-- Fine-tunes a backbone encoder (default `intfloat/multilingual-e5-base`) using Matryoshka multi-resolution losses.
+- Fine-tunes a backbone encoder (default `intfloat/multilingual-e5-base`) using Matryoshka multi-granularity losses.
 - Builds batches with `NonRepeatingBatchSampler` so that batched pairs never include transitively similar URLs as artificial negatives.
 - Checkpoints model and optimiser state whenever validation improves.
 
 ### `modified-angie.py`
 - Implements the AngIE loss with cosine, angle, and contrastive objectives for comparison-style baselines.
-- Shares the same batching strategy and CLI surface as the Matryoshka trainer.
+- Shares the same batching strategy as the Matryoshka trainer. This should be used to train more traditional non-Matryoshka style embeddings. 
 
 ## Quick Start
 
