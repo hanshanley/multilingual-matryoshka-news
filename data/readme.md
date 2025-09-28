@@ -1,0 +1,36 @@
+# Dataset Acquisition
+
+This document outlines how to obtain the external corpora used alongside this project. Each source has its own license and access requirements—review the linked documentation before downloading or redistributing the data.
+
+## SemEval 2022 Task 8 – Multilingual News Article Similarity
+- **Overview:** Article pairs labelled for graded similarity across English, Spanish, Russian, Turkish, and Farsi news outlets. Details are in the shared task description (Lai et al., 2022) – https://aclanthology.org/2022.semeval-1.155.pdf.
+- **Access:** The organisers only distribute metadata (URLs, similarity scores, splits) via the CodaLab competition page: http://www.euagendas.org/semeval2022. You must create a CodaLab account, join the competition, and accept the licence to download the official `.tsv` files (train/dev/test links and labels).
+- **Scraping the articles:** Because the original news content cannot be redistributed, download the pages yourself. The organisers provide an Internet Archive scraper published at https://github.com/euagendas/semeval_8_2022_ia_downloader (PyPI package `semeval_8_2022_ia_downloader`).
+  1. Create an isolated environment (`python3 -m venv venv && source venv/bin/activate`).
+  2. Install the package: `pip install semeval_8_2022_ia_downloader`.
+  3. Run the CLI with the provided metadata file: `python -m semeval_8_2022_ia_downloader.cli --links_file=training_links.tsv --dump_dir=downloads/`.
+  4. The script saves each article as both `.html` (Internet Archive snapshot) and `.json` (newspaper3k extraction) under hash-based subdirectories, e.g. `downloads/89/0123456789.html`.
+- **Notes:** Expect occasional 404/timeout errors from the Wayback Machine; rerun the downloader on the failed rows. Keep the raw `.tsv` files alongside the scraped content so you can map article IDs back to similarity labels.
+
+## Miranda et al. 2018 – Multilingual Streaming News Clustering
+- **Overview:** Clustering benchmark introduced by Miranda et al. (2018) – “Multilingual Clustering of Streaming News” (https://aclanthology.org/D18-1483.pdf). Contains anonymised news-stream segments with gold story IDs for English, Spanish, and German.
+- **Access:** Priberam hosts the public release in the `news-clustering` repository: https://github.com/Priberam/news-clustering.
+  1. Clone or download the repo to inspect the helper scripts.
+  2. Run `download_data.sh` (requires `wget`) or execute the commands manually:
+     - `wget -P dataset --user=anonymous --password=anonymous ftp://ftp.priberam.pt/SUMMAPublic/Corpora/Clustering/2018.0/dataset/dataset.dev.json`
+     - `wget -P dataset --user=anonymous --password=anonymous ftp://ftp.priberam.pt/SUMMAPublic/Corpora/Clustering/2018.0/dataset/dataset.test.json`
+     - `wget -P dataset --user=anonymous --password=anonymous ftp://ftp.priberam.pt/SUMMAPublic/Corpora/Clustering/2018.0/dataset-tok-ner/clustering.dev.json`
+     - `wget -P dataset --user=anonymous --password=anonymous ftp://ftp.priberam.pt/SUMMAPublic/Corpora/Clustering/2018.0/dataset-tok-ner/clustering.test.json`
+  3. The FTP endpoint accepts anonymous login; the script writes JSON files beneath a local `dataset/` directory.
+- **Notes:** The release already includes tokenisation and NER annotations used in the paper. Consult the repository README for additional scripts and evaluation utilities.
+
+## 20 Newsgroups
+- **Overview:** Classic topic-classification corpus with ~18k English Usenet posts across 20 categories. Documentation: https://scikit-learn.org/0.19/datasets/twenty_newsgroups.html.
+- **Access via scikit-learn:**
+  ```python
+  from sklearn.datasets import fetch_20newsgroups
+  data = fetch_20newsgroups(subset="all", remove=("headers", "footers", "quotes"), download_if_missing=True)
+  ```
+  The loader downloads the compressed archive on first use (defaults to `~/scikit_learn_data/`). Set `data_home=` to choose a different cache directory, e.g. within `data/raw/`.
+- **Alternative download:** The same page links to the original `20news-bydate` tarball if you prefer manual extraction.
+- **Notes:** The dataset is released under a permissive licence for research; still review the scikit-learn documentation for any redistribution constraints.
