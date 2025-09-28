@@ -1,6 +1,6 @@
 # Dataset Acquisition
 
-This document outlines how to obtain the external corpora used alongside this project. Each source has its own license and access requirements—review the linked documentation before downloading or redistributing the data.
+This document outlines how to obtain the external corpora used alongside this project. Each source has its own license and access requirements—review the linked documentation before downloading or redistributing the data. We provide access to the synthetic versions of the SemEval 2022 Task 8 dataset that we created in our paper as well as the similarity labels for all articles here. 
 
 ## SemEval 2022 Task 8 – Multilingual News Article Similarity
 - **Overview:** Article pairs labelled for graded similarity across English, Spanish, Russian, Turkish, and Farsi news outlets. Details are in the shared task description (Lai et al., 2022) – https://aclanthology.org/2022.semeval-1.155.pdf.
