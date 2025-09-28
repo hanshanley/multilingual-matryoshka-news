@@ -34,8 +34,6 @@ requirements.txt               # Core Python dependencies
 utils.py                       # Helper functions shared across the project
 ```
 
-## Quick Start
-
 1. **Install dependencies**
 
    ```bash
@@ -79,5 +77,40 @@ Refer to the README files in each folder for additional options, required
 data formats, and detailed explanations of the batching/sampling strategies.
 
 ## Citation
+```
+@inproceedings{hanley-durumeric-2025-hierarchical,
+    title = "Hierarchical Level-Wise News Article Clustering via Multilingual Matryoshka Embeddings",
+    author = "Hanley, Hans William Alexander  and
+      Durumeric, Zakir",
+    editor = "Che, Wanxiang  and
+      Nabende, Joyce  and
+      Shutova, Ekaterina  and
+      Pilehvar, Mohammad Taher",
+    booktitle = "Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)",
+    month = jul,
+    year = "2025",
+    address = "Vienna, Austria",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2025.acl-long.124/",
+    doi = "10.18653/v1/2025.acl-long.124",
+    pages = "2476--2492",
+    ISBN = "979-8-89176-251-0",
+    abstract = "Contextual large language model embeddings are increasingly utilized for topic modeling and clustering. However, current methods often scale poorly, rely on opaque similarity metrics, and struggle in multilingual settings. In this work, we present a novel, scalable, interpretable, hierarchical, and multilingual approach to clustering news articles and social media data. To do this, we first train multilingual Matryoshka embeddings that can determine story similarity at varying levels of granularity based on which subset of the dimensions of the embeddings is examined. This embedding model achieves state-of-the-art performance on the SemEval 2022 Task 8 test dataset (Pearson $\rho$ = 0.816). Once trained, we develop an efficient hierarchical clustering algorithm that leverages the hierarchical nature of Matryoshka embeddings to identify unique news stories, narratives, and themes. We conclude by illustrating how our approach can identify and cluster stories, narratives, and overarching themes within real-world news datasets."
+}
+```
 
-If you use this repository in academic work, please cite the original paper.
+## License and Copyright
+
+Copyright 2024 The Board of Trustees of The Leland Stanford Junior University
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
