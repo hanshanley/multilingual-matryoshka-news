@@ -1,0 +1,7 @@
+# Core runtime
+torch>=2.0
+transformers>=4.35
+tqdm>=4.64
+
+# Optional utilities
+pypdf>=3.0
