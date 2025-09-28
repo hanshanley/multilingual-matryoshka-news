@@ -31,13 +31,13 @@ python clustering/level-wise-rac.py \
   --embedding-path data/embeddings.pkl \
   --output-path outputs/cluster_assignments.json \
   --thresholds 0.5,0.55,0.6 \
-  --projections 384,192
+  --dimensions 192,384,768
 ```
 
 Key options:
 
-- `--thresholds`: Similarity thresholds (per level) passed to RAC++ (default `0.5,0.5,0.5`).
-- `--projections`: Optional centroid projection dimensions for the levels *before* the next clustering step. Leave empty to automatically halve the dimensionality at each level.
+- `--thresholds`: Similarity thresholds (per level) passed to RAC++ (default `0.5,0.55,0.6`).
+- `--dimensions`: Dimensionality schedule for the clustering hierarchy. Defaults to the Matryoshka ordering `192,384,768`.
 - `--embedding-dim`: Expected dimensionality for embeddings (default `768`).
 - `--rac-max-points`, `--rac-threads`, `--rac-metric`: Expose RAC++ runtime parameters.
 
@@ -50,5 +50,5 @@ The output JSON contains:
 ## Notes
 
 - Thresholds are interpreted as cosine similarity cut-offs. RAC++ receives `(1 - threshold)` as epsilon.
-- Projection dimensions must not exceed the original embedding dimensionality. The final level automatically skips projection.
+- Dimension values must not exceed the original embedding dimensionality. Vectors are truncated to the requested size at every level.
 - Large datasets may require tuning `--rac-max-points` and `--rac-threads` to balance recall and execution time.
