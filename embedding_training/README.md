@@ -59,3 +59,4 @@ Both commands accept additional flags:
 - Training and validation losses are logged to STDOUT through `tqdm` progress bars and the standard logger.
 
 Refer to the main repository README for evaluation scripts and downstream clustering pipelines.
+- **Sampler rationale:** By default the scripts build batches with a `NonRepeatingBatchSampler` that references the similarity graph. This prevents URLs that are explicitly or transitively connected from being placed in the same mini-batch as artificial negatives—a common failure mode when training with pairwise datasets collected from multiple sources. Disable it only if you need pure random sampling and can tolerate potential label leakage.
