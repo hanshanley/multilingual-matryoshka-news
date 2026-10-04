@@ -63,9 +63,9 @@ utils.py                       # Helper functions shared across the project
    
 ***Request mE5 Model Weights***
 
-In this work, a fine-tuned version of mE5-base achieved the best downstream results. To request the model weights, please complete this [Google form](https://forms.gle/ASzCcywsQ4Pd9Eyh6).
-
 **Update on model availability:** I recently learned that the previously shared files may have been corrupted during upload. Once I have verified the replacement files, I will update this notice and share them with those who requested access. I apologize for the inconvenience and appreciate your patience.
+
+In this work, a fine-tuned version of mE5-base achieved the best downstream results. To request the model weights, please complete this [Google form](https://forms.gle/ASzCcywsQ4Pd9Eyh6).
 
 4. **Generate embeddings for raw text**
 
